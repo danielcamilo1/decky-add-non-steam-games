@@ -1,5 +1,7 @@
 # Add Non-Steam Games
 
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/danielcamilo)
+
 A [Decky Loader](https://decky.xyz) plugin for adding non-Steam games to your Steam library **without leaving Game Mode**.
 
 Normally adding a shortcut means switching to Desktop Mode, opening the Steam client, and digging through "Add a Non-Steam Game". This plugin puts a file browser in the Quick Access menu instead.
@@ -126,6 +128,14 @@ Worth knowing if you touch `steam.ts`:
 - Nothing is persisted until Steam shuts down cleanly. `SteamClient.User.StartRestart(false)` is the only way to force it from Game Mode.
 - Every `Set*` returns `void` with no success signal, so the shortcut is read back through `RegisterForAppDetails` and compared against what was requested. A mismatch is surfaced to the user rather than swallowed.
 - Collections go through the untyped `collectionStore` global: `NewUnsavedCollection(name, undefined, [])` for a new one, then `AsDragDropCollection().AddApps([overview])` and `await Save()`. `AddApps` takes **app overviews**, not appIds, so the shortcut has to be registered in `appStore` first — which the `AddShortcut` path already guarantees.
+
+## Support
+
+This plugin is free and open source, and it will stay that way. If it saved you a trip to Desktop Mode and you feel like saying thanks, you can buy me a coffee — it is genuinely appreciated and it keeps the updates coming ☕
+
+[![Buy me a coffee at ko-fi.com](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/danielcamilo)
+
+Starring the repo, reporting a bug or suggesting a feature helps just as much — and costs nothing.
 
 ## License
 
