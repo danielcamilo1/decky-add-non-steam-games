@@ -1,0 +1,83 @@
+import { DialogButton, Focusable } from "@decky/ui";
+import type { ReactNode } from "react";
+
+export interface ListRowProps {
+  icon: ReactNode;
+  label: string;
+  /** Right-aligned secondary text: free space, app source, and so on. */
+  trailing?: string;
+  onSelect(): void;
+}
+
+/**
+ * One selectable row.
+ *
+ * Rows are deliberately full width and a single line: in the Quick Access
+ * panel that makes them large D-pad targets, and keeps a long list scannable
+ * without a trackpad.
+ */
+export function ListRow({ icon, label, trailing, onSelect }: ListRowProps) {
+  return (
+    <DialogButton
+      onClick={onSelect}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "10px",
+        // Tighter than a default DialogButton so a full list fits on screen,
+        // but still a comfortable controller target.
+        padding: "8px 12px",
+        minHeight: "0",
+        width: "100%",
+        minWidth: "0",
+        fontSize: "14px",
+        lineHeight: "1.2",
+        textAlign: "left",
+      }}
+    >
+      <span
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          width: "20px",
+          height: "20px",
+          fontSize: "15px",
+          opacity: 0.85,
+        }}
+      >
+        {icon}
+      </span>
+      <span
+        style={{
+          flex: "1 1 auto",
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
+      {trailing && <span style={{ flexShrink: 0, opacity: 0.6, fontSize: "11px" }}>{trailing}</span>}
+    </DialogButton>
+  );
+}
+
+/**
+ * Vertical group of rows.
+ *
+ * `flow-children="vertical"` keeps up/down moving between rows instead of
+ * escaping the group, which is what makes these lists usable in Game Mode.
+ */
+export function ListGroup({ children }: { children: ReactNode }) {
+  return (
+    <Focusable
+      flow-children="vertical"
+      style={{ display: "flex", flexDirection: "column", gap: "3px", padding: "0 16px" }}
+    >
+      {children}
+    </Focusable>
+  );
+}
