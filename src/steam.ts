@@ -1,5 +1,3 @@
-import { findSP } from "@decky/ui";
-
 /** A Proton/compatibility tool as reported by `SteamClient.Settings.GetGlobalCompatTools`. */
 export interface CompatibilityTool {
   strToolName: string;
@@ -271,76 +269,6 @@ export async function addToCollection(
   const collection = existing ?? store.NewUnsavedCollection(name, undefined, []);
   collection.AsDragDropCollection().AddApps([overview]);
   await collection.Save();
-}
-
-/**
- * The window the panel's own DOM lives in.
- *
- * A plugin's JavaScript does not necessarily run in the window it renders into:
- * the global `document` here is a different document from the one holding the
- * Quick Access panel. That single fact explains two symptoms that look
- * unrelated — `document.hasFocus()` reporting false (it is not the focused
- * document, and never will be) and a document-wide query for the panel's own
- * `<input>` elements finding none of them.
- *
- * So anything to do with focus, the clipboard or `execCommand` has to be aimed
- * at *this* window, resolved from a node that is actually in the panel.
- */
-export function panelWindow(node?: Node | null): Window {
-  const fromNode = node?.ownerDocument?.defaultView;
-  if (fromNode) return fromNode;
-
-  try {
-    return findSP();
-  } catch (error) {
-    console.error("[add-non-steam-games] could not find Steam's window", error);
-    return window;
-  }
-}
-
-/**
- * Read the clipboard through the web API, in the panel's own window.
- *
- * Refuses with *Document is not focused* unless that document holds focus, so
- * callers still need a fallback — but pass the right window and it at least has
- * a chance, which it never does from the plugin's own context.
- */
-export async function readClipboard(view: Window = window): Promise<string> {
-  const clipboard: { readText?(): Promise<string> } | undefined = view.navigator?.clipboard;
-  if (typeof clipboard?.readText !== "function") {
-    throw new Error("This Steam build does not allow reading the clipboard.");
-  }
-  return await clipboard.readText();
-}
-
-/**
- * Paste into `input` using Steam's own native paste.
- *
- * This is the mechanism behind the on-screen keyboard's paste key, and the only
- * one that reaches the Steam client's internal clipboard: Game Mode runs on
- * gamescope, which does not implement `wl_data_device_manager`, so there is no
- * compositor clipboard for `wl-paste` — or anything else outside Steam — to
- * read.
- *
- * The paste happens natively, below React, so the caller reads the result off
- * the element rather than waiting for a change event that may never come.
- * Returns whether the call was made at all.
- */
-export function nativePaste(input: HTMLInputElement): boolean {
-  const browser = SteamClient?.Browser;
-  if (typeof browser?.Paste !== "function") return false;
-
-  try {
-    input.focus();
-    // Some builds gate clipboard access on a recent user activation, and a
-    // gamepad button press does not always count as one.
-    if (typeof browser.NotifyUserActivation === "function") browser.NotifyUserActivation();
-    browser.Paste();
-    return true;
-  } catch (error) {
-    console.error("[add-non-steam-games] native paste failed", error);
-    return false;
-  }
 }
 
 /**

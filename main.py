@@ -3,13 +3,11 @@ import base64
 import glob
 import json
 import os
-import pwd
 import re
 import shlex
 import shutil
 import ssl
 import stat
-import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,7 +36,7 @@ NON_EXECUTABLE_EXTENSIONS = {
 SETTINGS_FILENAME = "settings.json"
 
 # Shown in the panel so a stale install is obvious. Keep in sync with package.json.
-PLUGIN_VERSION = "1.7.9"
+PLUGIN_VERSION = "1.7.10"
 
 # "ask" prompts after every add; "always"/"never" skip the prompt.
 RESTART_CHOICES = ("ask", "always", "never")
@@ -97,22 +95,6 @@ STEAM_ID64_BASE = 76561197960265728
 LOGIN_USER_ID = re.compile(r'^\s*"(\d{17})"\s*$')
 
 LOGIN_USER_MOST_RECENT = re.compile(r'^\s*"MostRecent"\s+"1"\s*$')
-
-# Tools that can read the desktop clipboard, best first. Game Mode runs on
-# gamescope, a Wayland compositor, so wl-paste is the one that normally answers;
-# the X11 pair is there for a desktop session. None of them is guaranteed to be
-# installed, which is why this is a fallback and not the only route.
-CLIPBOARD_READERS = (
-    ("wl-paste", ("wl-paste", "--no-newline", "--type", "text/plain")),
-    ("xclip", ("xclip", "-selection", "clipboard", "-o")),
-    ("xsel", ("xsel", "--clipboard", "--output")),
-)
-
-CLIPBOARD_TIMEOUT = 4
-
-# Clipboard contents longer than this are not an API key, and there is no reason
-# to move a whole document across the bridge to find that out.
-MAX_CLIPBOARD_CHARS = 4096
 
 # XDG keys we offer as places, in the order they are shown.
 XDG_PLACES = (
@@ -655,87 +637,6 @@ class Plugin:
         self._write_settings()
         # Never log the key itself; the plugin log is what users attach to reports.
         decky.logger.info("SteamGridDB key %s", "saved" if self.settings["steamgriddb_key"] else "cleared")
-
-    async def read_clipboard(self) -> dict:
-        """
-        The desktop clipboard, read from outside Steam.
-
-        Steam's own web context refuses `navigator.clipboard.readText()` unless
-        the panel's document holds focus, which in Game Mode it frequently does
-        not — and the on-screen keyboard's paste key does not reach a controlled
-        field either. Asking the compositor sidesteps both, when the tool for it
-        happens to be installed.
-        """
-        try:
-            return await asyncio.to_thread(self._read_clipboard)
-        except (OSError, ValueError) as error:
-            decky.logger.warning("Could not read the clipboard: %s", error)
-            return {"text": "", "error": str(error)}
-
-    def _read_clipboard(self) -> dict:
-        env = self._session_env()
-        tried = []
-
-        for name, command in CLIPBOARD_READERS:
-            if not shutil.which(command[0]):
-                tried.append(f"{name} is not installed")
-                continue
-
-            try:
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    timeout=CLIPBOARD_TIMEOUT,
-                    env=env,
-                    check=False,
-                )
-            except (OSError, subprocess.SubprocessError) as error:
-                tried.append(f"{name}: {error}")
-                continue
-
-            if result.returncode != 0:
-                detail = result.stderr.decode("utf-8", "replace").strip()
-                tried.append(f"{name}: {detail or f'exited {result.returncode}'}")
-                continue
-
-            text = result.stdout.decode("utf-8", "replace").strip()
-            if text:
-                decky.logger.info("Read %d characters from the clipboard via %s", len(text), name)
-                return {"text": text[:MAX_CLIPBOARD_CHARS], "error": ""}
-            tried.append(f"{name}: the clipboard is empty")
-
-        return {"text": "", "error": "; ".join(tried) or "no clipboard tool is available"}
-
-    def _session_env(self) -> dict:
-        """
-        The environment a clipboard tool needs to find the user's session.
-
-        The backend runs as root, where none of this is set, so the desktop
-        user's runtime directory and display have to be pointed at explicitly.
-        """
-        env = dict(os.environ)
-
-        try:
-            uid = pwd.getpwnam(decky.DECKY_USER).pw_uid
-        except KeyError:
-            uid = 1000
-
-        runtime = f"/run/user/{uid}"
-        if os.path.isdir(runtime):
-            env["XDG_RUNTIME_DIR"] = runtime
-        env.setdefault("DISPLAY", ":0")
-
-        if "WAYLAND_DISPLAY" not in env:
-            sockets = [
-                os.path.basename(path)
-                for pattern in ("gamescope-*", "wayland-[0-9]")
-                for path in sorted(glob.glob(os.path.join(runtime, pattern)))
-                if not path.endswith(".lock")
-            ]
-            if sockets:
-                env["WAYLAND_DISPLAY"] = sockets[0]
-
-        return env
 
     async def find_artwork(self, search_name: str) -> dict:
         """

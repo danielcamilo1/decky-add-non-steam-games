@@ -1,7 +1,7 @@
 import { TextField } from "@decky/ui";
 import { useQuickAccessVisible } from "@decky/api";
 import { useEffect, useRef } from "react";
-import type { MutableRefObject, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 // `useQuickAccessVisible` only exists on loader API v2. @decky/api falls back to
 // v1 against older loaders, where it is undefined — calling it would blank the
@@ -14,8 +14,6 @@ interface TextEntryProps {
   value: string;
   description?: ReactNode;
   onChange(value: string): void;
-  /** Filled with the underlying input, for a caller that needs to paste into it. */
-  inputRef?: MutableRefObject<HTMLInputElement | null>;
   /**
    * Accept pastes that never reach this element.
    *
@@ -45,15 +43,15 @@ interface TextEntryProps {
  * that changes with no event at all.
  *
  * Note that everything is resolved from the element rather than from the global
- * `document`, which belongs to a different window than the panel — see
- * `panelWindow` in ./steam.
+ * `document`: a plugin's JavaScript does not run in the window it renders into,
+ * so this context's `document` is not the one holding the Quick Access panel,
+ * and a listener or a query aimed at it finds nothing.
  */
 export function TextEntry({
   label,
   value,
   description,
   onChange,
-  inputRef,
   captureGlobalPaste,
 }: TextEntryProps) {
   const row = useRef<HTMLDivElement>(null);
@@ -124,7 +122,6 @@ export function TextEntry({
         listen(watched, false);
         listen(input, true);
         watched = input;
-        if (inputRef) inputRef.current = input;
       }
       if (input) onInput();
     };

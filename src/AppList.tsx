@@ -158,10 +158,14 @@ export function AppList({ applications, failed, onSelect, onRefresh }: AppListPr
           common reason for searching and finding nothing.
 
           A row rather than a ButtonItem, so it lines up with the disclosure row
-          and the application rows above it instead of sitting at its own width. */}
-      <ListGroup>
-        <ListRow icon={<FaArrowRotateRight />} label="Rescan applications" onSelect={onRefresh} />
-      </ListGroup>
+          and the application rows above it instead of sitting at its own width —
+          set off by a gap, since it is a different kind of action from the rows
+          it would otherwise be flush against. */}
+      <div style={{ marginTop: "10px" }}>
+        <ListGroup>
+          <ListRow icon={<FaArrowRotateRight />} label="Rescan applications" onSelect={onRefresh} />
+        </ListGroup>
+      </div>
     </PanelSection>
   );
 }

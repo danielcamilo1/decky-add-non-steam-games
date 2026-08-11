@@ -1,6 +1,6 @@
 {
   "name": "add-non-steam-games",
-  "version": "1.7.9",
+  "version": "1.7.10",
   "description": "Decky Loader plugin to add non-Steam games to your Steam library from Game Mode",
   "type": "module",
   "scripts": {

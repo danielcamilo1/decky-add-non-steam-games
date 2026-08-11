@@ -127,15 +127,6 @@ export interface ArtworkSlotResult {
   error: string;
 }
 
-/**
- * The desktop clipboard, read by the backend rather than by Steam's web
- * context — which refuses unless the panel's document holds focus.
- *
- * `text` is "" when no clipboard tool is installed, with `error` saying which
- * ones were tried.
- */
-export const readSystemClipboard = callable<[], { text: string; error: string }>("read_clipboard");
-
 export const getArtworkSettings = callable<[], ArtworkSettings>("get_artwork_settings");
 export const setArtworkEnabled = callable<[value: boolean], void>("set_artwork_enabled");
 export const setSteamGridDbKey = callable<[value: string], void>("set_steamgriddb_key");

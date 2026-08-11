@@ -25,7 +25,6 @@ import {
   log,
   makeExecutable,
   ping,
-  readSystemClipboard,
   rememberDirectory,
   setArtworkEnabled,
   setRestartPreference,
@@ -54,10 +53,7 @@ import {
   addToCollection,
   getCompatibilityTools,
   listCollections,
-  nativePaste,
-  panelWindow,
   pickDefaultCompatTool,
-  readClipboard,
   removeShortcut,
   restartSteam,
   setShortcutIcon,
@@ -551,25 +547,17 @@ function Content() {
     await saveKey(key);
   };
 
-  /**
-   * `immediate` skips the debounce, for a key that arrived all at once rather
-   * than a character at a time — a pasted key should be usable straight away.
-   */
-  const onChangeArtwork = (patch: Partial<ArtworkSettings>, immediate = false) => {
+  const onChangeArtwork = (patch: Partial<ArtworkSettings>) => {
     setArtworkSettings((current) => ({ ...current, ...patch }));
 
     if (patch.enabled !== undefined) setArtworkEnabled(patch.enabled).catch(() => {});
     if (patch.key !== undefined) {
       const key = patch.key;
       clearTimeout(keySaveTimer.current);
-      if (immediate) {
+      unsavedKey.current = key;
+      keySaveTimer.current = window.setTimeout(() => {
         saveKey(key).catch(() => {});
-      } else {
-        unsavedKey.current = key;
-        keySaveTimer.current = window.setTimeout(() => {
-          saveKey(key).catch(() => {});
-        }, 700);
-      }
+      }, 700);
     }
   };
 
@@ -867,7 +855,11 @@ function StackedDropdown({
       </PanelSectionRow>
       {description && (
         <PanelSectionRow>
-          <Field description={description} padding="compact" />
+          {/* Indented, so it reads as a note belonging to the control above it
+              rather than as the next thing in the section. */}
+          <div style={{ paddingLeft: "8px" }}>
+            <Field description={description} padding="compact" />
+          </div>
         </PanelSectionRow>
       )}
     </>
@@ -1032,138 +1024,16 @@ function OptionsSection({
   value: RestartPreference;
   onChange(value: RestartPreference): void;
   artwork: ArtworkSettings;
-  onChangeArtwork(patch: Partial<ArtworkSettings>, immediate?: boolean): void;
+  onChangeArtwork(patch: Partial<ArtworkSettings>): void;
   /** What SteamGridDB said about the saved key, or "" before it was asked. */
   keyStatus: string;
   onCheckKey(): void;
 }) {
-  const [pasteResult, setPasteResult] = useState<string | null>(null);
-
-  // `TextEntry` fills this with the real <input>, which is what the paste routes
-  // below write into and read back from.
-  const keyInputRef = useRef<HTMLInputElement | null>(null);
-  const keyInput = () => keyInputRef.current;
-
-  /** Wait briefly for a native paste to show up on the element. */
-  const waitForField = async (input: HTMLInputElement, before: string): Promise<string> => {
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const value = input.value.trim();
-      if (value && value !== before.trim()) return value;
-    }
-    return "";
-  };
-
-  const commitKey = (key: string, from: string) => {
-    // Saved without waiting out the debounce: the next thing anyone does after
-    // pasting a key is use it.
-    onChangeArtwork({ key }, true);
-    setPasteResult(`Pasted ${key.length} characters (via ${from}).`);
-    log("info", `Paste key succeeded via ${from}`).catch(() => {});
-  };
-
-  /**
-   * Get the key in by whatever route this Steam build allows.
-   *
-   * On a Deck in Game Mode the obvious routes are all closed, so these are
-   * ordered by what actually works there rather than by tidiness:
-   *
-   * 1. Steam's native paste into the field. gamescope implements no clipboard
-   *    of its own, so the Steam client's internal one is the only clipboard
-   *    there is, and this is how the on-screen keyboard reaches it.
-   * 2. `navigator.clipboard.readText()`, which refuses with *Document is not
-   *    focused* unless the panel holds the window's focus.
-   * 3. `execCommand("paste")`, for builds where the clipboard API is denied.
-   * 4. The backend asking the compositor — no use under gamescope, but right
-   *    for a desktop session.
-   * 5. Whatever is already in the field, so pasting with the keyboard and then
-   *    pressing this still works.
-   */
-  const onPasteKey = async () => {
-    setPasteResult("Reading the clipboard…");
-    const input = keyInput();
-    // Read up front: every route below writes into the field, so this is what
-    // "changed" is measured against.
-    const before = input?.value ?? "";
-
-    // Every route's outcome, not just the last one. Three rounds of "it still
-    // does not work" went by without knowing which of these actually ran.
-    const tried: string[] = [];
-    const because = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
-    // Everything below has to be aimed at the window the panel's DOM is in.
-    // This plugin's own `window` is a different one, whose document can never
-    // hold focus — which is what every clipboard read was failing on.
-    const view = panelWindow(input);
-    const doc = input?.ownerDocument ?? view.document;
-
-    if (!input) {
-      tried.push("field: no input element");
-    } else if (nativePaste(input)) {
-      const pasted = await waitForField(input, before);
-      if (pasted) return commitKey(pasted, "Steam paste");
-      tried.push("Steam paste: nothing arrived");
-    } else {
-      tried.push("Steam paste: unavailable");
-    }
-
-    for (const attempt of [0, 1]) {
-      try {
-        const pasted = (await readClipboard(view)).trim();
-        if (pasted) return commitKey(pasted, "clipboard");
-        tried.push("clipboard: empty");
-        break;
-      } catch (error) {
-        if (attempt === 0) {
-          // Focus may simply not have landed on that document yet.
-          view.focus();
-          input?.focus();
-          await new Promise((resolve) => setTimeout(resolve, 150));
-        } else {
-          tried.push(`clipboard: ${because(error)}${doc.hasFocus() ? "" : " (still unfocused)"}`);
-        }
-      }
-    }
-
-    if (input) {
-      try {
-        input.focus();
-        if (doc.execCommand("paste")) {
-          const pasted = await waitForField(input, before);
-          if (pasted) return commitKey(pasted, "execCommand");
-          tried.push("execCommand: nothing arrived");
-        } else {
-          tried.push("execCommand: refused");
-        }
-      } catch (error) {
-        tried.push(`execCommand: ${because(error)}`);
-      }
-    }
-
-    try {
-      const fromBackend = await readSystemClipboard();
-      const text = fromBackend.text.trim();
-      if (text) return commitKey(text, "desktop clipboard");
-      tried.push(`desktop: ${fromBackend.error || "empty"}`);
-    } catch (error) {
-      tried.push(`desktop: ${because(error)}`);
-    }
-
-    const inField = (input?.value || before).trim();
-    if (inField && inField !== artwork.key.trim()) return commitKey(inField, "field");
-
-    const summary = tried.join("; ");
-    log("warning", `Paste key failed — ${summary}`).catch(() => {});
-    setPasteResult(
-      `No route worked (${summary}). Type the key in with the keyboard instead.`,
-    );
-  };
-
   return (
     <PanelSection title="Options">
       <StackedDropdown
         label="Restart Steam after adding"
-        description="Restarting is what saves new games permanently."
+        description="Steam requires a client (soft) restart to save shortcuts."
         rgOptions={[
           { data: "ask", label: "Ask each time" },
           { data: "always", label: "Always restart" },
@@ -1176,7 +1046,7 @@ function OptionsSection({
       <PanelSectionRow>
         <ToggleField
           label="Download artwork"
-          description="Fetch grid, hero, logo and icon art from SteamGridDB for each game you add."
+          description="Automatically applies artwork from SteamGridDB to the created shortcut."
           checked={artwork.enabled}
           onChange={(enabled) => onChangeArtwork({ enabled })}
         />
@@ -1184,36 +1054,32 @@ function OptionsSection({
 
       {artwork.enabled && (
         <>
-          {/* Above the field, not below it: the instructions are read once,
-              while the field and its paste button have to stay next to each
-              other. They also go away entirely once a key is set. */}
+          {/* Above the field, not below it: the instructions are read once and
+              then go away entirely, while the field stays. */}
           {!artwork.key.trim() && (
             <PanelSectionRow>
-              <Field
-                padding="compact"
-                description={`SteamGridDB needs a free API key. Create one at ${artwork.key_url}, copy it, then press Paste key below.`}
-              />
+              <div style={{ paddingLeft: "8px" }}>
+                <Field
+                  padding="compact"
+                  description={`SteamGridDB needs a free API key. Create one at ${artwork.key_url}, then paste it into the field below.`}
+                />
+              </div>
             </PanelSectionRow>
           )}
 
+          {/* Set off from the toggle above it: the field's own label is small
+              enough that, flush, it reads as part of that row. */}
           <PanelSectionRow>
-            <TextEntry
-              label="SteamGridDB API key"
-              value={artwork.key}
-              inputRef={keyInputRef}
-              // The one field a user cannot reasonably type, so it takes a
-              // paste even when the event was aimed somewhere else.
-              captureGlobalPaste
-              onChange={(next) => onChangeArtwork({ key: next })}
-            />
-          </PanelSectionRow>
-
-          {/* Directly under the field, with nothing between them, and silent
-              until it has something to report. */}
-          <PanelSectionRow>
-            <ButtonItem layout="below" description={pasteResult ?? undefined} onClick={onPasteKey}>
-              Paste key
-            </ButtonItem>
+            <div style={{ paddingTop: "10px" }}>
+              <TextEntry
+                label="SteamGridDB API key"
+                value={artwork.key}
+                // The one field a user cannot reasonably type, so it takes a
+                // paste even when the event was aimed somewhere else.
+                captureGlobalPaste
+                onChange={(next) => onChangeArtwork({ key: next })}
+              />
+            </div>
           </PanelSectionRow>
 
           {/* The key is checked against SteamGridDB after every save, so this

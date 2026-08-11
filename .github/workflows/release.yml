@@ -60,6 +60,33 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # What changed comes from CHANGELOG.md, so the release page says something
+      # about this version rather than only how to install it. A version with no
+      # section still releases — with the install instructions alone, as before.
+      - name: Build release notes
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+          awk -v heading="## v$version" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > changelog-section.md
+
+          if [ -s changelog-section.md ]; then
+            cat changelog-section.md > release-notes.md
+          else
+            echo "::warning::No CHANGELOG.md section for v$version."
+            : > release-notes.md
+          fi
+
+          cat >> release-notes.md <<'EOF'
+
+          ## Installing
+
+          Install in Decky Loader with **Settings → Developer mode → Install Plugin from URL**, using the `.zip` link below, or download it and copy it to the Deck.
+          EOF
+
       - name: Create release
         if: steps.tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
@@ -68,5 +95,4 @@ jobs:
           name: v${{ steps.meta.outputs.version }}
           files: ${{ steps.meta.outputs.zip }}
           generate_release_notes: true
-          body: |
-            Install in Decky Loader with **Settings → Developer mode → Install Plugin from URL**, using the `.zip` link below, or download it and copy it to the Deck.
+          body_path: release-notes.md

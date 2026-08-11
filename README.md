@@ -26,7 +26,7 @@ A shortcut lands in your library as a grey box with a filename on it unless you 
 Set it up once under **Options**:
 
 1. Turn on **Download artwork**.
-2. Create a key at [steamgriddb.com/profile/preferences/api](https://www.steamgriddb.com/profile/preferences/api) and copy it, then press **Paste key** under the **SteamGridDB API key** field. The keyboard's own paste key works too, as does typing it in. The key is saved and checked against SteamGridDB straight away, and **Check the artwork key** re-checks it any time.
+2. Create a key at [steamgriddb.com/profile/preferences/api](https://www.steamgriddb.com/profile/preferences/api), copy it, and paste it into the **SteamGridDB API key** field with the on-screen keyboard's paste key. Typing it in works too. The key is saved and checked against SteamGridDB straight away, and **Check the artwork key** re-checks it any time.
 
 Art is matched by **title**, so when the name you gave the game is not the name SteamGridDB knows — `Hollow_Knight_Silksong.x86_64`, or a launcher you called *ELDEN RING (mods)* — put the real title in the form's **Artwork title** field. The shortcut keeps your name.
 
@@ -66,7 +66,7 @@ Field codes (`%U`, `%f`, Flatpak's `@@u … @@` wrappers) are stripped, and the 
 
 **Nothing happens when I launch the game.** Native Linux games need the executable bit — the plugin offers **Mark as executable** when it is missing, but a drive mounted `noexec` (common for some SD card and NTFS setups) will refuse it, and the plugin will tell you so. Windows games need a compatibility tool selected.
 
-**The API key will not paste.** Press **Paste key** under the field, which goes through Steam's own paste rather than the browser clipboard APIs that Game Mode blocks. If it cannot get at the clipboard it says which routes it tried; check the copy itself took by pasting into the library search box. Typing the key in always works, or write it into `~/homebrew/settings/Add Non-Steam Games/settings.json` as `{"steamgriddb_key": "…"}` and restart `plugin_loader`.
+**The API key will not paste.** Use the on-screen keyboard's own paste key with the field focused — that is the only route to the clipboard Game Mode has. Check the copy itself took by pasting into the library search box. Typing the key in always works, or write it into `~/homebrew/settings/Add Non-Steam Games/settings.json` as `{"steamgriddb_key": "…"}` and restart `plugin_loader`.
 
 **The artwork never appeared.** The line under **Last added** says why. Press **Check the artwork key** first — most of the time it is the key. If that line instead names applied slots and a file count, the art reached Steam, so press **Open game page** to look; only the icon waits for a restart. A *certificate* error there almost always means the Deck's clock is wrong.
 
@@ -126,7 +126,7 @@ Decky renders plugin content only while the panel is visible, so hiding it destr
 
 ### The plugin's `window` is not the panel's `window`
 
-Plugin JavaScript runs in a different context from the window it renders into. The global `document` is not the one holding the panel, so `document.hasFocus()` is always false and a document-wide query cannot see the panel's own elements. Anything touching focus, the clipboard or `execCommand` goes through `panelWindow()` in `steam.ts`, which resolves the right window from a node; across that boundary prefer `contains()` and `tagName` over `instanceof`.
+Plugin JavaScript runs in a different context from the window it renders into. The global `document` is not the one holding the panel, so `document.hasFocus()` is always false and a document-wide query cannot see the panel's own elements. Anything touching focus, events or element lookup has to resolve its window and document from a node that is actually in the panel — `node.ownerDocument`, never the global; across that boundary prefer `contains()` and `tagName` over `instanceof`.
 
 ### Styling, focus and selection
 
@@ -144,7 +144,7 @@ Keep resolved components off the path of background work. The throw comes back o
 
 Use `TextEntry` for any text field; a bare `TextField` silently eats pastes. The on-screen keyboard pastes **natively**, below React — the element's value changes without a change event, so the next render restores the old value. `TextEntry` watches the real `<input>` instead (`input`, a deferred `paste`, `beforeinput`, and a poll for a value that changes with no event at all) and renders an offscreen input of its own, because `SteamClient.Browser.Paste()` needs a focused editable element.
 
-There is no clipboard outside Steam to fall back on: gamescope implements no `wl_data_device_manager`, so the client's internal one is all there is. `onPasteKey` tries `Browser.Paste()` first, then `navigator.clipboard.readText()`, `execCommand("paste")`, the backend's compositor read for desktop sessions, and finally whatever is already in the field.
+There is no clipboard outside Steam to fall back on: gamescope implements no `wl_data_device_manager`, so the client's internal one is all there is and the on-screen keyboard is the only thing that reaches it. Every in-panel route around that — `navigator.clipboard.readText()`, `execCommand("paste")`, a backend read via `wl-paste`/`xclip` — was tried and removed in 1.7.10; the keyboard's paste key lands correctly once `TextEntry` is watching the field, which is the whole fix.
 
 ### Notes on SteamGridDB
 
