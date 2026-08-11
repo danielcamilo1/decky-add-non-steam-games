@@ -9,30 +9,34 @@ Normally adding a shortcut means switching to Desktop Mode, opening the Steam cl
 ## Usage
 
 1. Open the Quick Access menu (`•••`) and select **Add Non-Steam Games**.
-2. Choose what to browse with the switch at the top:
+2. Pick where to look with the **Browse** switch:
    - **Applications** — everything installed on the device, native, Flatpak and Snap alike, with icons and a search box. This is the one you want for something like Chrome installed from Bazaar.
    - **Files** — **Places** (Home, Downloads, Documents, Games…) and **Drives** (SD card, external disks, with free space shown), then browse to the game's executable.
-3. Adjust the name, pick a compatibility tool if the game is a Windows `.exe`, and add launch options if you need them.
-4. Optionally pick a **Collection** to file it under — one of your existing ones, or *New collection…* to create one on the spot.
-5. Press **Add to Steam**.
+3. Adjust the name, pick a compatibility tool if the game is a Windows `.exe`, and add launch options, an **Artwork title** or a **Collection** if you want them.
+4. Press **Add to Steam**.
 
-The game appears in your library immediately, and the plugin then offers to restart Steam — see below for why that matters. **Open game page** jumps straight to it, and **Undo** removes it again if you picked the wrong file.
+The game appears in your library immediately, and the plugin then asks to restart Steam. **Steam only writes its non-Steam game list to disk when it shuts down**, so a game added without a restart is lost if Steam is killed or the Deck loses power. Answer once with *Remember my choice* and it stops asking; change your mind later under **Options → Restart Steam after adding**. **Options → Check saved games** lists what is actually on disk, if you are ever unsure a game stuck.
 
-Everything is a plain vertical list of full-width rows, so the whole flow is D-pad navigable without a trackpad.
+**Open game page** jumps straight to the new game, and **Undo** removes it again if you picked the wrong file. Everything is a plain vertical list of full-width rows, so the whole flow is D-pad navigable without a trackpad.
 
-### Why it asks to restart Steam
+### Artwork from SteamGridDB
 
-Steam keeps its non-Steam game list in memory and only writes `shortcuts.vdf` to disk **during a clean shutdown**. A game added without restarting looks fine right up until Steam is killed or the Deck loses power — then it is gone.
+A shortcut lands in your library as a grey box with a filename on it unless you give it art. With a free [SteamGridDB](https://www.steamgriddb.com) API key the plugin fetches the portrait capsule, the wide grid, the hero banner, the logo and the icon for every game you add.
 
-So after each add you get a **Restart Steam?** prompt, with a *Remember my choice* toggle. Your answer is saved as **Always restart** or **Never restart**, and either can be changed later under **Options → Restart Steam after adding** (or set back to *Ask each time*).
+Set it up once under **Options**:
 
-**Options → Check saved games** reads `shortcuts.vdf` directly and lists what Steam has actually committed to disk. That is the ground truth if you are ever unsure whether a game really stuck — remember it only changes after a restart.
+1. Turn on **Download artwork**.
+2. Create a key at [steamgriddb.com/profile/preferences/api](https://www.steamgriddb.com/profile/preferences/api) and copy it, then press **Paste key** under the **SteamGridDB API key** field. The keyboard's own paste key works too, as does typing it in. The key is saved and checked against SteamGridDB straight away, and **Check the artwork key** re-checks it any time.
+
+Art is matched by **title**, so when the name you gave the game is not the name SteamGridDB knows — `Hollow_Knight_Silksong.x86_64`, or a launcher you called *ELDEN RING (mods)* — put the real title in the form's **Artwork title** field. The shortcut keeps your name.
+
+Each add shows a progress bar, then a line under **Last added** saying what it applied. The library art appears immediately; only the icon waits for a restart. If nothing came back, or the art belongs to a different game, correct the **Artwork title** there and press **Try artwork again**. Nothing here can fail the add — the game is in your library before artwork is fetched.
 
 ### Applications
 
-The Applications list reads the same `.desktop` files the desktop menu does — `/usr/share/applications`, both Flatpak export directories, Snap, and your user directory — in XDG precedence order, so a user override shadows the system copy rather than appearing twice. Each row shows the app's real icon and where it came from (*Flatpak*, *Snap*, *System*, *User*).
+The Applications list is collapsed to its search box by default — a Deck with 180 desktop entries would otherwise bury everything below it. Type and matches appear immediately; **Show all applications** opens the full list.
 
-Entries marked `NoDisplay`/`Hidden`, non-application types, and anything whose binary is not actually installed (`TryExec`) are filtered out, so the list matches what you could really launch.
+It reads the same `.desktop` files the desktop menu does, in XDG precedence order, so a user override shadows the system copy rather than appearing twice. Each row shows the app's real icon and where it came from (*Flatpak*, *Snap*, *System*, *User*). Hidden entries, non-application types and anything whose binary is not installed are filtered out, so the list matches what you could really launch.
 
 Picking an app fills the form in the same way Steam's own desktop dialog does. For a Flatpak that means the executable is the `flatpak` runner and the launch options carry the run arguments and app ID:
 
@@ -41,19 +45,18 @@ Exe:            /usr/bin/flatpak
 Launch options: run --branch=stable --arch=x86_64 --command=/app/bin/chrome com.google.Chrome
 ```
 
-Desktop-entry field codes (`%U`, `%f`, and Flatpak's `@@u … @@` wrappers) are stripped, since Steam has no use for them. The app's icon is applied to the shortcut too.
+Field codes (`%U`, `%f`, Flatpak's `@@u … @@` wrappers) are stripped, and the app's icon is applied to the shortcut.
 
 ### What it handles for you
 
 - **Name** is pre-filled from the filename and stays editable.
 - **Start directory** is set to the executable's folder, which is what most games expect.
-- **Proton** is preselected for `.exe`, `.bat`, `.cmd` and `.msi` files, using Proton Experimental when available. Any compatibility tool Steam knows about can be chosen from the dropdown.
-- **Missing executable bit** — downloads often arrive without it, and Steam will not launch such a file. When that is the case a **Mark as executable** button appears.
+- **Proton** is preselected for `.exe`, `.bat`, `.cmd` and `.msi` files, using Proton Experimental when available. Any compatibility tool Steam knows about can be chosen instead.
+- **Missing executable bit** — downloads often arrive without it and Steam will not launch such a file, so a **Mark as executable** button appears when it is needed.
 - **Wrong file type** — picking an archive, a `.dll` or an image gets you a warning rather than a broken shortcut.
-- **Localised folders** — Places reads `~/.config/user-dirs.dirs`, so *Downloads* is right even if your desktop language is not English.
+- **Localised folders** — Places reads `~/.config/user-dirs.dirs`, so *Downloads* is right whatever your desktop language is, and the folder you browsed last comes first.
 - **Drives** are read from `/proc/mounts` and named from their filesystem label rather than `mmcblk0p1`.
-- The most recently browsed folder appears at the top of Places.
-- **Collections** are optional and default to *None*. The list is re-read every time the panel opens, so a collection you just made elsewhere in Steam is there. Because Steam treats collection names case-insensitively, creating one that differs only in case updates the existing collection instead of shadowing it. If filing into a collection fails, you are told — but the game is still added, since it exists by that point.
+- **Collections** are optional. The list is re-read every time the panel opens, so one you just made elsewhere in Steam is there, and creating a name that differs only in case updates the existing collection rather than shadowing it. A collection that fails to file is reported, but the game is still added.
 
 ## Troubleshooting
 
@@ -63,19 +66,25 @@ Desktop-entry field codes (`%U`, `%f`, and Flatpak's `@@u … @@` wrappers) are 
 
 **Nothing happens when I launch the game.** Native Linux games need the executable bit — the plugin offers **Mark as executable** when it is missing, but a drive mounted `noexec` (common for some SD card and NTFS setups) will refuse it, and the plugin will tell you so. Windows games need a compatibility tool selected.
 
-**Something else is wrong.** **Diagnostics → Run checks** reports whether the Python backend loaded, whether each Steam API the plugin needs is actually present, and how many shortcuts Steam has in memory versus saved to disk. A *frontend build MISMATCH* there means the zip only half-installed — reinstall it.
+**The API key will not paste.** Press **Paste key** under the field, which goes through Steam's own paste rather than the browser clipboard APIs that Game Mode blocks. If it cannot get at the clipboard it says which routes it tried; check the copy itself took by pasting into the library search box. Typing the key in always works, or write it into `~/homebrew/settings/Add Non-Steam Games/settings.json` as `{"steamgriddb_key": "…"}` and restart `plugin_loader`.
 
-Details of every add are written to `~/homebrew/logs/Add Non-Steam Games/plugin.log`.
+**The artwork never appeared.** The line under **Last added** says why. Press **Check the artwork key** first — most of the time it is the key. If that line instead names applied slots and a file count, the art reached Steam, so press **Open game page** to look; only the icon waits for a restart. A *certificate* error there almost always means the Deck's clock is wrong.
+
+**The artwork is for the wrong game.** SteamGridDB matched a different title, which the **Last added** line names when it differs from what was searched for. Correct the **Artwork title** and press **Try artwork again**, or replace individual images from the game's page.
+
+**Something else is wrong.** The panel says so at the top: *the Python backend is not responding* when the plugin's backend failed to load, and a version mismatch when the zip only half-installed (reinstall it and `sudo systemctl restart plugin_loader`).
+
+Details of every add — including every artwork search, slot and file — go to the plugin's log. Decky keeps it at `~/homebrew/logs/Add Non-Steam Games/plugin.log`; if that folder does not exist, the backend never loaded, and the whole client-side log is at `/tmp/plugin_loader.log` (Decky's own *Settings → Developer → Logs* opens the same thing).
 
 ## Installing
 
-Grab `out/Add-Non-Steam-Games-v1.6.0.zip` and either:
+Grab `out/Add-Non-Steam-Games-v1.7.9.zip` and either:
 
 - **From the Deck:** Decky Loader → settings (gear) → *Developer mode* → *Install Plugin from URL*, pointing at a URL serving the zip; or
 - **Manually:** copy the zip to the Deck, then extract it into `~/homebrew/plugins/`:
 
   ```bash
-  unzip Add-Non-Steam-Games-v1.6.0.zip -d ~/homebrew/plugins/
+  unzip Add-Non-Steam-Games-v1.7.9.zip -d ~/homebrew/plugins/
   sudo systemctl restart plugin_loader
   ```
 
@@ -99,35 +108,59 @@ The frontend lives in `src/`:
 - `SourceTabs.tsx` — the Applications/Files switch.
 - `AppList.tsx` — the searchable installed-application list.
 - `LocationList.tsx` — the Places/Drives rows.
-- `ListRow.tsx` — the row and group primitives both lists are built from.
+- `ListRow.tsx` — the row, group and disclosure primitives the lists are built from.
+- `ProgressRow.tsx` — the artwork progress bar, drawn from plain elements (see below).
+- `TextEntry.tsx` — the text field every form uses (see below; do not use `TextField` directly).
+- `SavedGames.tsx` — the *Check saved games* list.
 - `RestartPrompt.tsx` — the post-add restart dialog.
-- `Diagnostics.tsx` — the runtime capability checks.
+- `version.ts` — the build number, compared against the backend's at startup.
 - `steam.ts` — shortcut creation against Steam's own `SteamClient.Apps` API.
+- `artwork.ts` — drives the SteamGridDB download slot by slot, reporting progress.
 - `backend.ts` / `pathinfo.ts` — typed bindings to `main.py`, and the local fallback used when the backend is unreachable.
 
 ### The Quick Access panel unmounts under you
 
-Decky's `PluginView` renders a plugin's content as `{(visible || activePlugin.alwaysRender) && activePlugin.content}` — so the moment the Quick Access panel is hidden, **the whole component tree is unmounted and its React state is destroyed**.
+Decky renders plugin content only while the panel is visible, so hiding it destroys the component tree and every bit of React state in it — and opening the file picker hides it. `alwaysRender: true` keeps the tree mounted, and the in-progress selection lives in `store.ts`, a module-level object with a subscription hook, so it survives an unmount even if one happens. Anything that has to outlive a modal belongs there rather than in `useState`.
 
-Opening the file picker hides the panel. Without care, the picked file resolves into an unmounted component and the panel reopens blank, looking exactly like the picker did nothing. Two things prevent that:
+`main.py` is the Python backend: it inspects picked paths, sets the executable bit, enumerates user directories and drives, stores preferences, fetches artwork and parses `shortcuts.vdf`.
 
-- `alwaysRender: true` on the plugin, which keeps the content mounted.
-- The in-progress selection lives in `store.ts`, a module-level object with a subscription hook, so it survives an unmount even if one happens anyway.
+### The plugin's `window` is not the panel's `window`
 
-Any state that must outlive opening a modal belongs in the store, not in `useState`.
+Plugin JavaScript runs in a different context from the window it renders into. The global `document` is not the one holding the panel, so `document.hasFocus()` is always false and a document-wide query cannot see the panel's own elements. Anything touching focus, the clipboard or `execCommand` goes through `panelWindow()` in `steam.ts`, which resolves the right window from a node; across that boundary prefer `contains()` and `tagName` over `instanceof`.
 
-`main.py` is the Python backend: it inspects picked paths, sets the executable bit, enumerates user directories and mounted drives, stores preferences, and parses `shortcuts.vdf`.
+### Styling, focus and selection
+
+Steam paints gamepad focus onto a button's own surface, so an inline `background`, `border` or `box-shadow` outranks it and swallows the highlight — the user can no longer see what pressing A would do. Steam's class names are hashed at build time, so take them from `@decky/ui`'s class modules instead of writing strings.
+
+`SourceTabs` therefore marks the selected tab from inside the button, with an underline and a heavier font in `currentColor`, so selection and focus read independently. `StackedDropdown` puts label, control and description on their own lines, which at Quick Access width would otherwise each wrap to a couple of words.
+
+### `@decky/ui` components are matched against Steam's bundle
+
+Every component `@decky/ui` exports is one of Steam's own, found at runtime by string-matching its minified code — so a client update can leave an export `undefined`, and rendering that throws.
+
+Keep resolved components off the path of background work. The throw comes back out through the `setState` that reported progress (Steam's React 16 renders those synchronously) and abandons the job: a progress bar that cannot draw itself takes the download with it. `ProgressRow` is a `<div>` and a percentage for that reason, and `fetchArtwork` wraps its progress callback so a UI failure cannot reach the work.
+
+### Text fields need `TextEntry`
+
+Use `TextEntry` for any text field; a bare `TextField` silently eats pastes. The on-screen keyboard pastes **natively**, below React — the element's value changes without a change event, so the next render restores the old value. `TextEntry` watches the real `<input>` instead (`input`, a deferred `paste`, `beforeinput`, and a poll for a value that changes with no event at all) and renders an offscreen input of its own, because `SteamClient.Browser.Paste()` needs a focused editable element.
+
+There is no clipboard outside Steam to fall back on: gamescope implements no `wl_data_device_manager`, so the client's internal one is all there is. `onPasteKey` tries `Browser.Paste()` first, then `navigator.clipboard.readText()`, `execCommand("paste")`, the backend's compositor read for desktop sessions, and finally whatever is already in the field.
+
+### Notes on SteamGridDB
+
+- **Do not write library art into `userdata/<account>/config/grid` yourself.** That is the desktop-tool approach (BoilR, Steam ROM Manager) and a running Steam does not notice it. Apply art with `SteamClient.Apps.SetCustomArtworkForApp(appId, base64, 'png', assetType)` — `ELibraryAssetType` being 0 capsule, 1 hero, 2 logo, 3 header, 4 icon — preceded by `ClearCustomArtworkForApp` and a 500 ms wait, since `Set` will not replace existing art and `Clear` resolves before it has finished. [SteamGridDB's own plugin](https://github.com/SteamGridDB/decky-steamgriddb) is the reference worth reading.
+- `'png'` is passed whatever the asset really is: that argument names the file Steam writes, not the format it decodes. A shortcut with no saved logo position renders its logo blank, so a default one is written after applying a logo.
+- The icon is the exception, being a path in `shortcuts.vdf` rather than library art: it is written to the grid folder of the account from `MostRecent` in `loginusers.vdf` and applied with `SetShortcutIcon`, only when the shortcut has no icon, and only visible after a restart.
+- **Every HTTPS request needs Decky's SSL context** (`from helpers import get_ssl_context`). The plugin sandbox has no CA bundle Python can find, so anything else fails with `CERTIFICATE_VERIFY_FAILED`.
+- The backend splits the work into `find_artwork` and one `download_artwork_slot` per slot so progress can be reported, `list_artwork` reads the folder back as proof the art was accepted, and `artwork.ts` keeps a `DEFAULT_SLOTS` fallback — a loop over an empty slot list downloads nothing and reports no error. Downloads block, so they go through `asyncio.to_thread`, and the API key is never written to the log.
 
 ### Notes on Steam's shortcut API
 
-Worth knowing if you touch `steam.ts`:
-
-- `AddShortcut` is called as `AddShortcut(name, exe, "", "")` — **name and exe only**. Handing it a real `startDir` or `launchOptions` makes some client builds return `0` instead of an appId, so those fields are written afterwards via the `Set*` calls instead.
-- Those `Set*` calls silently do nothing until Steam has registered the new app, hence the `appStore` poll between the two.
-- **The target must be quoted; the start directory must not.** `SetShortcutExe` gets `"/path/to/game"` — an unquoted target produces a shortcut that appears correctly in the library and then silently fails to launch. `SetShortcutStartDir` gets the bare path. Confirmed on hardware.
-- Nothing is persisted until Steam shuts down cleanly. `SteamClient.User.StartRestart(false)` is the only way to force it from Game Mode.
-- Every `Set*` returns `void` with no success signal, so the shortcut is read back through `RegisterForAppDetails` and compared against what was requested. A mismatch is surfaced to the user rather than swallowed.
-- Collections go through the untyped `collectionStore` global: `NewUnsavedCollection(name, undefined, [])` for a new one, then `AsDragDropCollection().AddApps([overview])` and `await Save()`. `AddApps` takes **app overviews**, not appIds, so the shortcut has to be registered in `appStore` first — which the `AddShortcut` path already guarantees.
+- `AddShortcut` is called as `AddShortcut(name, exe, "", "")` — name and exe only, since some builds return `0` when given a start dir or launch options. Those are written afterwards with the `Set*` calls, which silently do nothing until `appStore` knows the app, hence the poll between them.
+- **The target must be quoted; the start directory must not.** An unquoted target produces a shortcut that looks right in the library and then fails to launch. Confirmed on hardware.
+- `Set*` calls return nothing, so the shortcut is read back through `RegisterForAppDetails` and compared against what was asked for; a mismatch is surfaced to the user rather than swallowed.
+- Nothing persists until Steam shuts down cleanly, and `SteamClient.User.StartRestart(false)` is the only way to force that from Game Mode.
+- Collections go through the untyped `collectionStore` global: `NewUnsavedCollection(name, undefined, [])`, then `AsDragDropCollection().AddApps([overview])` and `await Save()`. `AddApps` takes app overviews, not appIds.
 
 ## Support
 

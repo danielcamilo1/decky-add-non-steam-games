@@ -5,6 +5,6 @@
   "api_version": 1,
   "publish": {
     "tags": ["library", "utility"],
-    "description": "Add non-Steam games to your Steam library without leaving Game Mode. Browse for the game's executable and it becomes a shortcut, with Proton selectable for Windows games."
+    "description": "Add non-Steam games to your Steam library without leaving Game Mode. Browse for the game's executable and it becomes a shortcut, with Proton selectable for Windows games and artwork downloaded from SteamGridDB."
   }
 }

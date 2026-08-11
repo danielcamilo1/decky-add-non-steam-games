@@ -1,13 +1,29 @@
+import asyncio
 import base64
 import glob
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
+import ssl
 import stat
+import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import decky
+
+try:
+    # Decky Loader bundles certifi and hands its SSL context out through this
+    # module. Nothing else in the plugin sandbox has a CA bundle Python can
+    # find, so an HTTPS request made without it fails every time with
+    # CERTIFICATE_VERIFY_FAILED — "unable to get local issuer certificate".
+    from helpers import get_ssl_context  # type: ignore
+except ImportError:  # not running under the loader, e.g. the tests
+    get_ssl_context = None
 
 # Extensions that need a compatibility tool (Proton) to run on Linux.
 WINDOWS_EXTENSIONS = {".exe", ".bat", ".cmd", ".msi"}
@@ -22,10 +38,81 @@ NON_EXECUTABLE_EXTENSIONS = {
 SETTINGS_FILENAME = "settings.json"
 
 # Shown in the panel so a stale install is obvious. Keep in sync with package.json.
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.7.9"
 
 # "ask" prompts after every add; "always"/"never" skip the prompt.
 RESTART_CHOICES = ("ask", "always", "never")
+
+SGDB_API = "https://www.steamgriddb.com/api/v2"
+
+# Where a user gets the personal API key SteamGridDB requires. Shown in the
+# panel, so keep it copy-typeable rather than a full URL.
+SGDB_KEY_URL = "steamgriddb.com/profile/preferences/api"
+
+SGDB_TIMEOUT = 20
+
+# No piece of library artwork is legitimately this large. The cap only exists so
+# a surprising response cannot fill the Deck's disk.
+MAX_ARTWORK_BYTES = 12 * 1024 * 1024
+
+# Steam's `ELibraryAssetType`, the slot argument to `SetCustomArtworkForApp`.
+# Steam applies library art through that call and updates the library there and
+# then; only the icon still goes through a file and needs a restart.
+ASSET_CAPSULE = 0
+ASSET_HERO = 1
+ASSET_LOGO = 2
+ASSET_HEADER = 3
+ASSET_ICON = 4
+
+# The artwork slots filled for a shortcut: label, SteamGridDB endpoint, the
+# filename suffix Steam stores that slot under in its grid folder, the dimensions
+# to ask SteamGridDB for, and Steam's own `ELibraryAssetType` for the slot.
+#
+# Dimensions narrow the search to what Steam actually displays — grids are
+# fetched twice, once portrait for the library capsule and once wide for the
+# shelves and the Recent games row.
+#
+# The suffixes are only used to read the folder back as evidence; Steam writes
+# those files itself in response to `SetCustomArtworkForApp`. The icon is the
+# exception and is written here, since a shortcut's icon is a path Steam stores
+# in `shortcuts.vdf` rather than library art.
+ARTWORK_KINDS = (
+    ("grid", "grids", "p", "600x900,342x482,660x930", ASSET_CAPSULE),
+    ("wide grid", "grids", "", "460x215,920x430", ASSET_HEADER),
+    ("hero", "heroes", "_hero", "", ASSET_HERO),
+    ("logo", "logos", "_logo", "", ASSET_LOGO),
+    ("icon", "icons", "_icon", "", ASSET_ICON),
+)
+
+# Extensions Steam recognises for that artwork. A download keeps whatever the
+# asset really is; the other extensions for the same slot are deleted, since a
+# leftover from an earlier download would otherwise compete with the new file.
+ARTWORK_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".ico")
+
+# userdata folders are named with the account id, which is the low 32 bits of
+# the 64-bit SteamID that loginusers.vdf records.
+STEAM_ID64_BASE = 76561197960265728
+
+# A 64-bit SteamID as it appears as a group heading in loginusers.vdf.
+LOGIN_USER_ID = re.compile(r'^\s*"(\d{17})"\s*$')
+
+LOGIN_USER_MOST_RECENT = re.compile(r'^\s*"MostRecent"\s+"1"\s*$')
+
+# Tools that can read the desktop clipboard, best first. Game Mode runs on
+# gamescope, a Wayland compositor, so wl-paste is the one that normally answers;
+# the X11 pair is there for a desktop session. None of them is guaranteed to be
+# installed, which is why this is a fallback and not the only route.
+CLIPBOARD_READERS = (
+    ("wl-paste", ("wl-paste", "--no-newline", "--type", "text/plain")),
+    ("xclip", ("xclip", "-selection", "clipboard", "-o")),
+    ("xsel", ("xsel", "--clipboard", "--output")),
+)
+
+CLIPBOARD_TIMEOUT = 4
+
+# Clipboard contents longer than this are not an API key, and there is no reason
+# to move a whole document across the bridge to find that out.
+MAX_CLIPBOARD_CHARS = 4096
 
 # XDG keys we offer as places, in the order they are shown.
 XDG_PLACES = (
@@ -254,6 +341,180 @@ def _parse_binary_vdf(data: bytes) -> dict:
     return read_map()
 
 
+def _build_ssl_context() -> ssl.SSLContext:
+    """A verifying SSL context that works inside the plugin sandbox."""
+    if get_ssl_context is not None:
+        return get_ssl_context()
+
+    # Outside the loader, certifi is still the bundle worth trusting if it is
+    # installed; otherwise the system store, which is right on a desktop.
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """The shared SSL context. Built once: it reads a CA bundle off disk."""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = _build_ssl_context()
+    return _SSL_CONTEXT
+
+
+def _explain_url_error(reason: object) -> str:
+    """Turn a URLError reason into something a user can act on."""
+    detail = str(reason)
+    if "CERTIFICATE_VERIFY_FAILED" in detail:
+        return (
+            "could not verify the certificate — check the Deck's date and time, "
+            "since a wrong clock invalidates every certificate"
+        )
+    return detail
+
+
+def _sgdb_request(key: str, path: str, params: dict | None = None) -> list:
+    """
+    GET a SteamGridDB endpoint and return its `data` list.
+
+    Raises `RuntimeError` with a message meant for the panel — everything here
+    fails for reasons the user can act on (wrong key, no network), so a stack
+    trace in the log is not the useful part.
+
+    A 404 is not an error: the asset endpoints answer that way for a game that
+    simply has no artwork of that kind.
+    """
+    url = f"{SGDB_API}/{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {key}",
+        "User-Agent": f"add-non-steam-games/{PLUGIN_VERSION}",
+    })
+
+    try:
+        with urllib.request.urlopen(request, timeout=SGDB_TIMEOUT, context=_ssl_context()) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return []
+        if error.code in (401, 403):
+            raise RuntimeError("SteamGridDB rejected the API key") from error
+        if error.code == 429:
+            raise RuntimeError("SteamGridDB is rate-limiting this key; try again later") from error
+        raise RuntimeError(f"SteamGridDB returned HTTP {error.code}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"Could not reach SteamGridDB ({_explain_url_error(error.reason)})",
+        ) from error
+    except (ValueError, OSError) as error:
+        raise RuntimeError(f"SteamGridDB sent an unreadable response ({error})") from error
+
+    if not isinstance(payload, dict) or not payload.get("success"):
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        detail = ", ".join(str(item) for item in errors) if errors else "unknown error"
+        raise RuntimeError(f"SteamGridDB said: {detail}")
+
+    data = payload.get("data")
+    return data if isinstance(data, list) else []
+
+
+def _best_match(games: list, name: str) -> dict | None:
+    """
+    Pick the game a search meant.
+
+    SteamGridDB orders autocomplete results by relevance, so the first result is
+    normally right — but an exact title match further down the list is a better
+    answer than a fuzzy one at the top.
+    """
+    candidates = [
+        game for game in games
+        if isinstance(game, dict) and isinstance(game.get("id"), int) and game.get("name")
+    ]
+    if not candidates:
+        return None
+
+    wanted = name.strip().lower()
+    return next(
+        (game for game in candidates if str(game["name"]).strip().lower() == wanted),
+        candidates[0],
+    )
+
+
+def _download_artwork(url: str) -> bytes:
+    """Fetch one artwork file, refusing anything that is not a plain web download."""
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise RuntimeError(f"Refusing to download {url}")
+
+    request = urllib.request.Request(url, headers={
+        "User-Agent": f"add-non-steam-games/{PLUGIN_VERSION}",
+    })
+
+    try:
+        with urllib.request.urlopen(request, timeout=SGDB_TIMEOUT, context=_ssl_context()) as response:
+            # One byte past the cap, so an oversized file is detected rather
+            # than silently truncated.
+            data = response.read(MAX_ARTWORK_BYTES + 1)
+    # HTTPError is a URLError, so it has to be caught first or its status code
+    # is reported as the bare reason phrase.
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Download failed (HTTP {error.code})") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Download failed ({_explain_url_error(error.reason)})") from error
+    except OSError as error:  # socket and file errors
+        raise RuntimeError(f"Download failed ({error})") from error
+
+    if not data:
+        raise RuntimeError("Download was empty")
+    if len(data) > MAX_ARTWORK_BYTES:
+        raise RuntimeError(f"Artwork is larger than {MAX_ARTWORK_BYTES // (1024 * 1024)} MB")
+    return data
+
+
+def _write_artwork(directory: str, app_id: int, suffix: str, asset: dict) -> str:
+    """
+    Download one asset into Steam's grid folder and return where it landed.
+
+    Written to a temporary name and moved into place, so Steam can never read a
+    half-downloaded image.
+    """
+    url = asset.get("url")
+    if not isinstance(url, str) or not url:
+        raise RuntimeError("SteamGridDB returned an asset with no URL")
+
+    extension = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+    if extension not in ARTWORK_EXTENSIONS:
+        extension = ".png"
+
+    data = _download_artwork(url)
+    target = os.path.join(directory, f"{app_id}{suffix}{extension}")
+    partial = f"{target}.part"
+
+    with open(partial, "wb") as handle:
+        handle.write(data)
+    os.replace(partial, target)
+
+    for other in ARTWORK_EXTENSIONS:
+        if other == extension:
+            continue
+        try:
+            os.remove(os.path.join(directory, f"{app_id}{suffix}{other}"))
+        except OSError:
+            pass
+
+    return target
+
+
+def _no_game(message: str) -> dict:
+    """A failed artwork search, in the shape `find_artwork` promises."""
+    return {"found": False, "game_id": 0, "game_name": "", "error": message}
+
+
 class Plugin:
     async def _main(self):
         self.settings_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, SETTINGS_FILENAME)
@@ -371,6 +632,314 @@ class Plugin:
         self._write_settings()
         decky.logger.info("Restart preference set to %s", value)
 
+    # --- Artwork ---------------------------------------------------------
+
+    async def get_artwork_settings(self) -> dict:
+        """Whether artwork is wanted, the key it needs, and the slots it fills."""
+        return {
+            "enabled": self.settings.get("download_artwork", True) is not False,
+            "key": str(self.settings.get("steamgriddb_key") or ""),
+            "key_url": SGDB_KEY_URL,
+            # Handed to the frontend so it can count its own progress rather
+            # than keeping a second copy of this list.
+            "slots": [label for label, *_ in ARTWORK_KINDS],
+        }
+
+    async def set_artwork_enabled(self, value: bool) -> None:
+        self.settings["download_artwork"] = bool(value)
+        self._write_settings()
+        decky.logger.info("Artwork download %s", "enabled" if value else "disabled")
+
+    async def set_steamgriddb_key(self, value: str) -> None:
+        self.settings["steamgriddb_key"] = (value or "").strip()
+        self._write_settings()
+        # Never log the key itself; the plugin log is what users attach to reports.
+        decky.logger.info("SteamGridDB key %s", "saved" if self.settings["steamgriddb_key"] else "cleared")
+
+    async def read_clipboard(self) -> dict:
+        """
+        The desktop clipboard, read from outside Steam.
+
+        Steam's own web context refuses `navigator.clipboard.readText()` unless
+        the panel's document holds focus, which in Game Mode it frequently does
+        not — and the on-screen keyboard's paste key does not reach a controlled
+        field either. Asking the compositor sidesteps both, when the tool for it
+        happens to be installed.
+        """
+        try:
+            return await asyncio.to_thread(self._read_clipboard)
+        except (OSError, ValueError) as error:
+            decky.logger.warning("Could not read the clipboard: %s", error)
+            return {"text": "", "error": str(error)}
+
+    def _read_clipboard(self) -> dict:
+        env = self._session_env()
+        tried = []
+
+        for name, command in CLIPBOARD_READERS:
+            if not shutil.which(command[0]):
+                tried.append(f"{name} is not installed")
+                continue
+
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    timeout=CLIPBOARD_TIMEOUT,
+                    env=env,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                tried.append(f"{name}: {error}")
+                continue
+
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", "replace").strip()
+                tried.append(f"{name}: {detail or f'exited {result.returncode}'}")
+                continue
+
+            text = result.stdout.decode("utf-8", "replace").strip()
+            if text:
+                decky.logger.info("Read %d characters from the clipboard via %s", len(text), name)
+                return {"text": text[:MAX_CLIPBOARD_CHARS], "error": ""}
+            tried.append(f"{name}: the clipboard is empty")
+
+        return {"text": "", "error": "; ".join(tried) or "no clipboard tool is available"}
+
+    def _session_env(self) -> dict:
+        """
+        The environment a clipboard tool needs to find the user's session.
+
+        The backend runs as root, where none of this is set, so the desktop
+        user's runtime directory and display have to be pointed at explicitly.
+        """
+        env = dict(os.environ)
+
+        try:
+            uid = pwd.getpwnam(decky.DECKY_USER).pw_uid
+        except KeyError:
+            uid = 1000
+
+        runtime = f"/run/user/{uid}"
+        if os.path.isdir(runtime):
+            env["XDG_RUNTIME_DIR"] = runtime
+        env.setdefault("DISPLAY", ":0")
+
+        if "WAYLAND_DISPLAY" not in env:
+            sockets = [
+                os.path.basename(path)
+                for pattern in ("gamescope-*", "wayland-[0-9]")
+                for path in sorted(glob.glob(os.path.join(runtime, pattern)))
+                if not path.endswith(".lock")
+            ]
+            if sockets:
+                env["WAYLAND_DISPLAY"] = sockets[0]
+
+        return env
+
+    async def find_artwork(self, search_name: str) -> dict:
+        """
+        Find the game SteamGridDB will be asked for artwork.
+
+        Split from the downloads so the panel can show real progress: one search,
+        then one call per artwork slot. Everything that can go wrong is reported
+        rather than raised — the shortcut already exists by the time any of this
+        runs, and missing artwork must never read as a failed add.
+        """
+        key = str(self.settings.get("steamgriddb_key") or "").strip()
+        if not key:
+            return _no_game(f"No SteamGridDB API key. Get one at {SGDB_KEY_URL}.")
+
+        name = (search_name or "").strip()
+        if not name:
+            return _no_game("No name to search SteamGridDB for")
+
+        try:
+            # Blocking, and this runs on the loader's event loop.
+            games = await asyncio.to_thread(
+                _sgdb_request, key, "search/autocomplete/" + urllib.parse.quote(name, safe=""),
+            )
+        except RuntimeError as error:
+            decky.logger.warning('Artwork search for "%s" failed: %s', name, error)
+            return _no_game(str(error))
+        except (OSError, ValueError) as error:
+            decky.logger.exception('Artwork search for "%s" failed', name)
+            return _no_game(str(error))
+
+        game = _best_match(games, name)
+        if not game:
+            return _no_game(f'SteamGridDB has no game called "{name}"')
+
+        decky.logger.info('Artwork search for "%s" matched %s (%s)', name, game["name"], game["id"])
+        return {"found": True, "game_id": int(game["id"]), "game_name": str(game["name"]), "error": ""}
+
+    async def download_artwork_slot(self, app_id: int, game_id: int, slot: str) -> dict:
+        """
+        Fetch one kind of artwork, for the frontend to hand to Steam.
+
+        Library art is *not* written to the grid folder here. Steam owns that
+        folder, and dropping files into it only takes effect at the next startup
+        if it takes effect at all; `SteamClient.Apps.SetCustomArtworkForApp` is
+        how Game Mode applies art, and it shows up immediately. So this returns
+        the image itself, base64-encoded, along with the asset type to apply it
+        as. The icon is the one slot Steam takes as a file path, so that one is
+        still written here.
+        """
+        empty = {"data": "", "extension": "", "asset_type": -1, "icon_path": "", "error": ""}
+
+        kind = next((entry for entry in ARTWORK_KINDS if entry[0] == slot), None)
+        if not kind:
+            return {**empty, "error": f"unknown artwork kind {slot!r}"}
+
+        key = str(self.settings.get("steamgriddb_key") or "").strip()
+        if not key:
+            return {**empty, "error": "artwork is not configured"}
+
+        try:
+            return await asyncio.to_thread(self._fetch_slot, int(app_id), int(game_id), kind, key)
+        except (RuntimeError, OSError, ValueError) as error:
+            decky.logger.warning("No %s for appid %s: %s", slot, app_id, error)
+            return {**empty, "error": str(error)}
+
+    def _fetch_slot(self, app_id: int, game_id: int, kind: tuple, key: str) -> dict:
+        label, endpoint, suffix, dimensions, asset_type = kind
+        empty = {"data": "", "extension": "", "asset_type": asset_type, "icon_path": "", "error": ""}
+
+        # Animated assets exist for some games; Steam does not display them for
+        # shortcuts, so they are filtered out rather than downloaded.
+        params = {"types": "static"}
+        if dimensions:
+            params["dimensions"] = dimensions
+
+        assets = _sgdb_request(key, f"{endpoint}/game/{game_id}", params)
+        if not assets:
+            return {**empty, "error": "none available"}
+
+        url = assets[0].get("url")
+        if not isinstance(url, str) or not url:
+            return {**empty, "error": "SteamGridDB returned an asset with no URL"}
+
+        # Steam takes a non-Steam game's icon from the shortcut itself, as a
+        # path, so this one has to exist on disk.
+        if asset_type == ASSET_ICON:
+            directory = self._artwork_dir()
+            if not directory:
+                return {**empty, "error": "could not find Steam's userdata folder"}
+            os.makedirs(directory, exist_ok=True)
+            written = _write_artwork(directory, app_id, suffix, assets[0])
+            decky.logger.info("Wrote %s for appid %s to %s", label, app_id, written)
+            return {**empty, "icon_path": written}
+
+        data = _download_artwork(url)
+        decky.logger.info(
+            "Fetched %s for appid %s from %s (%d KB)", label, app_id, url, len(data) // 1024,
+        )
+        return {
+            **empty,
+            "data": base64.b64encode(data).decode("ascii"),
+            # Always "png", whatever the asset really is. Steam accepts only
+            # "png" or "jpg" here and uses it for the filename it writes, not to
+            # decode with — the renderer sniffs the actual format. This is what
+            # SteamGridDB's own plugin passes for every asset it applies.
+            "extension": "png",
+        }
+
+    async def list_artwork(self, app_id: int) -> dict:
+        """
+        The artwork files on disk for one shortcut.
+
+        Steam writes these itself when it accepts art through
+        `SetCustomArtworkForApp`, so reading them back is how the panel can say
+        the art landed rather than just that it was sent.
+        """
+        directory = self._artwork_dir()
+        if not directory:
+            return {"directory": "", "files": [], "error": "Steam userdata folder not found"}
+
+        # Matched against the exact names this plugin writes rather than by
+        # prefix: one appid is a prefix of another often enough to matter.
+        wanted = {f"{int(app_id)}{kind[2]}" for kind in ARTWORK_KINDS}
+        try:
+            names = sorted(
+                name for name in os.listdir(directory)
+                if os.path.splitext(name)[0] in wanted
+            )
+        except OSError as error:
+            return {"directory": directory, "files": [], "error": str(error)}
+
+        return {"directory": directory, "files": names, "error": ""}
+
+    async def check_steamgriddb(self) -> dict:
+        """
+        Whether the saved key works, by actually calling SteamGridDB.
+
+        The panel runs this after every save. A key that was mistyped, truncated
+        by a partial paste, or never written to disk is indistinguishable from a
+        working one until something asks the API — and if that something is the
+        next add, the answer arrives far away from the field that caused it.
+        """
+        key = str(self.settings.get("steamgriddb_key") or "").strip()
+        if not key:
+            return {"ok": False, "detail": "no API key is saved"}
+
+        try:
+            await asyncio.to_thread(_sgdb_request, key, "search/autocomplete/portal")
+        except RuntimeError as error:
+            return {"ok": False, "detail": str(error)}
+        return {"ok": True, "detail": "key accepted"}
+
+    def _artwork_dir(self) -> str | None:
+        """
+        `userdata/<account>/config/grid`, where Steam reads custom artwork from.
+
+        A Deck can hold more than one Steam account, so the account that logged
+        in last wins — that is the library the user is looking at.
+        """
+        accounts: dict = {}
+        for root in self._userdata_roots():
+            try:
+                entries = sorted(os.listdir(root))
+            except OSError:
+                continue
+            for entry in entries:
+                path = os.path.join(root, entry)
+                # "0" is the folder Steam uses when nobody is logged in.
+                if entry.isdigit() and entry != "0" and os.path.isdir(path):
+                    accounts.setdefault(os.path.realpath(path), path)
+
+        if not accounts:
+            return None
+
+        recent = self._most_recent_account()
+        chosen = next(
+            (path for path in accounts.values() if os.path.basename(path) == recent),
+            None,
+        ) or max(accounts.values(), key=self._mtime)
+        return os.path.join(chosen, "config", "grid")
+
+    def _most_recent_account(self) -> str | None:
+        """Account id of the last Steam account to log in, per loginusers.vdf."""
+        for root in (os.path.join(".steam", "steam"), os.path.join(".local", "share", "Steam")):
+            path = os.path.join(decky.HOME, root, "config", "loginusers.vdf")
+            current = None
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
+                        heading = LOGIN_USER_ID.match(line)
+                        if heading:
+                            current = heading.group(1)
+                        elif current and LOGIN_USER_MOST_RECENT.match(line):
+                            return str(int(current) - STEAM_ID64_BASE)
+            except OSError:
+                continue
+        return None
+
+    def _mtime(self, path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
     # --- Diagnostics -----------------------------------------------------
 
     async def ping(self) -> str:
@@ -415,13 +984,16 @@ class Plugin:
 
         return {"found": True, "shortcuts": shortcuts}
 
-    def _shortcut_files(self) -> list:
-        roots = (
+    def _userdata_roots(self) -> tuple:
+        """Both paths Steam's userdata tree is reachable by. Usually the same place."""
+        return (
             os.path.join(decky.HOME, ".steam", "steam", "userdata"),
             os.path.join(decky.HOME, ".local", "share", "Steam", "userdata"),
         )
+
+    def _shortcut_files(self) -> list:
         found = []
-        for root in roots:
+        for root in self._userdata_roots():
             for path in glob.glob(os.path.join(root, "*", "config", "shortcuts.vdf")):
                 resolved = os.path.realpath(path)
                 if resolved not in found:

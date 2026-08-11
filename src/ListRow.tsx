@@ -1,5 +1,6 @@
 import { DialogButton, Focusable } from "@decky/ui";
 import type { ReactNode } from "react";
+import { FaChevronDown, FaChevronRight } from "react-icons/fa6";
 
 export interface ListRowProps {
   icon: ReactNode;
@@ -79,5 +80,34 @@ export function ListGroup({ children }: { children: ReactNode }) {
     >
       {children}
     </Focusable>
+  );
+}
+
+/**
+ * Row that expands or collapses the list below it.
+ *
+ * Built from `ListRow` so it sits in the same visual language as the rows it
+ * reveals, and the chevron says which way pressing A will go.
+ */
+export function DisclosureRow({
+  label,
+  expanded,
+  trailing,
+  onToggle,
+}: {
+  label: string;
+  expanded: boolean;
+  trailing?: string;
+  onToggle(): void;
+}) {
+  return (
+    <ListGroup>
+      <ListRow
+        icon={expanded ? <FaChevronDown /> : <FaChevronRight />}
+        label={label}
+        trailing={trailing}
+        onSelect={onToggle}
+      />
+    </ListGroup>
   );
 }

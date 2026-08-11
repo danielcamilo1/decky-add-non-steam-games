@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import type { ArtworkProgress, ArtworkResult } from "./artwork";
 import type { PathInfo } from "./backend";
 
 export interface AddedShortcut {
@@ -8,6 +9,12 @@ export interface AddedShortcut {
   verified: boolean;
   /** Collection the game was filed into, if any. */
   collection?: string;
+  /** What was searched for on SteamGridDB, kept so the user can retry. */
+  searchName: string;
+  /** null until the download finishes, or when artwork was not wanted. */
+  artwork: ArtworkResult | null;
+  /** Set while a download is running, and what the progress bar reads from. */
+  artworkProgress: ArtworkProgress | null;
 }
 
 /** Dropdown value meaning "create a collection with the name typed below". */
@@ -21,6 +28,14 @@ export interface Draft {
   source: Source;
   target: PathInfo | null;
   name: string;
+  /**
+   * Title to search SteamGridDB for, when it differs from `name`.
+   *
+   * Empty means "search for the name above", which is right for a real game
+   * title and wrong for something like "ELDEN RING launcher" or a Flatpak's
+   * display name — hence the override.
+   */
+  artworkName: string;
   launchOptions: string;
   compatTool: string;
   /** Icon file to give the shortcut, taken from the picked application. */
@@ -37,6 +52,7 @@ const EMPTY: Draft = {
   source: "apps",
   target: null,
   name: "",
+  artworkName: "",
   launchOptions: "",
   compatTool: "",
   iconPath: "",
@@ -74,6 +90,7 @@ export function clearSelection(): void {
   updateDraft({
     target: null,
     name: "",
+    artworkName: "",
     launchOptions: "",
     compatTool: "",
     iconPath: "",

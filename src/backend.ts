@@ -95,6 +95,83 @@ export const setRestartPreference = callable<[value: RestartPreference], void>("
 /** Mirror frontend events into the plugin log so failures are diagnosable. */
 export const log = callable<[level: string, message: string], void>("log");
 
+export interface ArtworkSettings {
+  /** Whether to fetch artwork after each add. */
+  enabled: boolean;
+  /** The user's SteamGridDB API key, or "" when they have not set one. */
+  key: string;
+  /** Where to get a key, so the panel and the README cannot disagree. */
+  key_url: string;
+  /** The artwork kinds an add fills: grid, wide grid, hero, logo, icon. */
+  slots: string[];
+}
+
+export interface ArtworkMatch {
+  found: boolean;
+  game_id: number;
+  /** Title SteamGridDB matched, which is not always what was searched for. */
+  game_name: string;
+  /** "" when a game was found. */
+  error: string;
+}
+
+export interface ArtworkSlotResult {
+  /** The image, base64-encoded, for `SetCustomArtworkForApp`. "" for the icon. */
+  data: string;
+  /** What to tell Steam the image is: "png" or "jpg". */
+  extension: string;
+  /** Steam's `ELibraryAssetType` for this slot, or -1 when the slot is unknown. */
+  asset_type: number;
+  /** Set only for the icon, which is a file path on the shortcut itself. */
+  icon_path: string;
+  error: string;
+}
+
+/**
+ * The desktop clipboard, read by the backend rather than by Steam's web
+ * context — which refuses unless the panel's document holds focus.
+ *
+ * `text` is "" when no clipboard tool is installed, with `error` saying which
+ * ones were tried.
+ */
+export const readSystemClipboard = callable<[], { text: string; error: string }>("read_clipboard");
+
+export const getArtworkSettings = callable<[], ArtworkSettings>("get_artwork_settings");
+export const setArtworkEnabled = callable<[value: boolean], void>("set_artwork_enabled");
+export const setSteamGridDbKey = callable<[value: string], void>("set_steamgriddb_key");
+
+/**
+ * Find the game to fetch artwork for.
+ *
+ * Never rejects for a missing key, an unknown title or a network problem — the
+ * game is already added by then, so those come back as `found: false`.
+ */
+export const findArtwork = callable<[searchName: string], ArtworkMatch>("find_artwork");
+
+/**
+ * Fetch one artwork kind, for the frontend to hand to Steam.
+ *
+ * One call per slot rather than one for all of them, so the panel can report
+ * progress while it happens — an add that restarts Steam immediately otherwise
+ * looks like it downloaded nothing at all.
+ */
+export const downloadArtworkSlot =
+  callable<[appId: number, gameId: number, slot: string], ArtworkSlotResult>(
+    "download_artwork_slot",
+  );
+
+/**
+ * The artwork files sitting in Steam's grid folder for one shortcut.
+ *
+ * Read back after a download so the panel can prove something landed — until
+ * Steam restarts, a successful download and a silent failure look the same.
+ */
+export const listArtwork =
+  callable<[appId: number], { directory: string; files: string[]; error: string }>("list_artwork");
+
+/** Whether artwork downloads would work: key accepted, grid folder found. */
+export const checkSteamGridDb = callable<[], { ok: boolean; detail: string }>("check_steamgriddb");
+
 export interface SavedShortcut {
   app_id: number;
   name: string;

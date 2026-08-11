@@ -1,41 +1,52 @@
 import {
   ButtonItem,
-  DropdownItem,
+  Dropdown,
   Field,
   Navigation,
   PanelSection,
   PanelSectionRow,
-  TextField,
+  ToggleField,
   showModal,
   staticClasses,
 } from "@decky/ui";
-import {
-  FileSelectionType,
-  definePlugin,
-  openFilePicker,
-  toaster,
-  useQuickAccessVisible,
-} from "@decky/api";
+import type { DropdownOption, SingleDropdownOption } from "@decky/ui";
+import { FileSelectionType, definePlugin, openFilePicker, toaster } from "@decky/api";
 import { useEffect, useRef, useState } from "react";
 import { FaPlus } from "react-icons/fa6";
 
 import {
+  checkSteamGridDb,
+  getArtworkSettings,
   getRestartPreference,
   getStartPath,
   inspectPath,
   listApplications,
   listLocations,
-  listSavedShortcuts,
   log,
   makeExecutable,
+  ping,
+  readSystemClipboard,
   rememberDirectory,
+  setArtworkEnabled,
   setRestartPreference,
+  setSteamGridDbKey,
 } from "./backend";
-import type { Application, Location, Locations, PathInfo, RestartPreference } from "./backend";
+import type {
+  Application,
+  ArtworkSettings,
+  Location,
+  Locations,
+  PathInfo,
+  RestartPreference,
+} from "./backend";
+import { fetchArtwork } from "./artwork";
 import { AppList } from "./AppList";
-import { Diagnostics, PLUGIN_VERSION } from "./Diagnostics";
+import { PLUGIN_VERSION } from "./version";
 import { LocationList } from "./LocationList";
+import { ProgressRow } from "./ProgressRow";
+import { SavedGames } from "./SavedGames";
 import { SourceTabs } from "./SourceTabs";
+import { TextEntry, usePanelVisible } from "./TextEntry";
 import { describePathLocally } from "./pathinfo";
 import { RestartPrompt } from "./RestartPrompt";
 import {
@@ -43,21 +54,30 @@ import {
   addToCollection,
   getCompatibilityTools,
   listCollections,
+  nativePaste,
+  panelWindow,
   pickDefaultCompatTool,
+  readClipboard,
   removeShortcut,
   restartSteam,
+  setShortcutIcon,
 } from "./steam";
 import type { CollectionSummary, CompatibilityTool } from "./steam";
-import { NEW_COLLECTION, clearSelection, updateDraft, useDraft } from "./store";
+import { NEW_COLLECTION, clearSelection, getDraft, updateDraft, useDraft } from "./store";
 import type { AddedShortcut } from "./store";
 
 const NO_COMPAT_TOOL = "";
 
-// `useQuickAccessVisible` only exists on loader API v2. @decky/api falls back to
-// v1 against older loaders, where it is undefined — calling it would blank the
-// whole panel, so resolve it once here.
-const usePanelVisible: () => boolean =
-  typeof useQuickAccessVisible === "function" ? useQuickAccessVisible : () => true;
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+// Used until the backend answers, and if it never does: artwork on, no key, so
+// the panel offers the feature instead of hiding it.
+const ARTWORK_UNKNOWN: ArtworkSettings = {
+  enabled: true,
+  key: "",
+  key_url: "steamgriddb.com/profile/preferences/api",
+  slots: [],
+};
 
 /**
  * Put every scrollable ancestor back to the top.
@@ -79,6 +99,7 @@ function Content() {
     source,
     target,
     name,
+    artworkName,
     launchOptions,
     compatTool,
     iconPath,
@@ -95,8 +116,11 @@ function Content() {
   const [compatTools, setCompatTools] = useState<CompatibilityTool[]>([]);
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
   const [restartPreference, setRestartPreferenceState] = useState<RestartPreference>("ask");
+  const [artworkSettings, setArtworkSettings] = useState<ArtworkSettings>(ARTWORK_UNKNOWN);
+  const [keyStatus, setKeyStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [backendError, setBackendError] = useState<string | null>(null);
+  const [versionWarning, setVersionWarning] = useState("");
 
   const panelVisible = usePanelVisible();
   const topAnchor = useRef<HTMLDivElement>(null);
@@ -136,8 +160,20 @@ function Content() {
         setLocations({ recent: null, places: [], drives: [] });
       });
     loadApplications(false);
+    // A zip that only half-installed leaves the Python and the panel on
+    // different versions, and every symptom after that is misleading.
+    ping()
+      .then((backend) => {
+        if (backend !== PLUGIN_VERSION) {
+          setVersionWarning(
+            `This install is half-updated: the Python backend is v${backend} and this panel is v${PLUGIN_VERSION}. Reinstall the plugin and restart plugin_loader.`,
+          );
+        }
+      })
+      .catch(() => {});
     getStartPath().then(setStartPath).catch(() => {});
     getRestartPreference().then(setRestartPreferenceState).catch(() => {});
+    getArtworkSettings().then(setArtworkSettings).catch(() => {});
     getCompatibilityTools().then(setCompatTools);
   }, []);
 
@@ -238,10 +274,20 @@ function Content() {
     }
   };
 
-  const promptRestart = async (gameName: string) => {
+  /**
+   * Offer, or take, the restart that makes the new shortcut permanent.
+   *
+   * `hold` stops an automatic restart. Something went wrong that the panel is
+   * currently explaining, and restarting Steam takes the explanation with it —
+   * which is how "it added the game and did nothing else" happens.
+   */
+  const promptRestart = async (gameName: string, hold = false) => {
     const preference = await getRestartPreference().catch(() => "ask" as RestartPreference);
 
     if (preference === "always") {
+      if (hold) return;
+      // Long enough to see what just happened before the client goes down.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       restartSteam();
       return;
     }
@@ -293,9 +339,75 @@ function Content() {
     }
   };
 
+  /**
+   * Fetch SteamGridDB artwork for a game that has already been added.
+   *
+   * Nothing here can fail the add — the game is in the library by now — so every
+   * outcome, including "no API key", ends up as a line under "Last added".
+   *
+   * `keepIcon` is set when the shortcut already carries an application's own
+   * icon, which is a better match for a Flatpak than SteamGridDB's guess.
+   */
+  const downloadArtworkFor = async (
+    appId: number,
+    searchName: string,
+    keepIcon: boolean,
+    slots: string[],
+  ) => {
+    // The user can add another game while this runs, so only ever patch the
+    // entry this download belongs to.
+    const patch = (fields: Partial<AddedShortcut>) => {
+      const current = getDraft().added;
+      if (current?.appId === appId) updateDraft({ added: { ...current, ...fields } });
+    };
+
+    const artwork = await fetchArtwork(appId, searchName, slots, (progress) =>
+      patch({ artworkProgress: progress }),
+    );
+
+    if (artwork.iconPath && !keepIcon) setShortcutIcon(appId, artwork.iconPath);
+
+    patch({ artwork, artworkProgress: null });
+    return artwork;
+  };
+
+  /**
+   * Re-read the artwork settings, and bring the panel into step with them.
+   *
+   * The copy loaded at mount is the only one the panel has, so a single failed
+   * read used to mean no artwork — and no slot list — for the rest of the
+   * session, silently.
+   */
+  const refreshArtworkSettings = async (): Promise<ArtworkSettings> => {
+    const settings = await getArtworkSettings().catch(() => artworkSettings);
+    // Not while a key is still on its way to disk: this would put the old one
+    // back in the field underneath whoever is typing.
+    if (unsavedKey.current === null) setArtworkSettings(settings);
+    return settings;
+  };
+
+  /**
+   * Fetch artwork for the game just added, on demand.
+   *
+   * Reachable whether or not the automatic attempt ran, since "it downloaded
+   * nothing" and "it was never asked to" look the same from the panel.
+   */
+  const retryArtwork = async () => {
+    const current = getDraft().added;
+    if (!current) return;
+
+    await flushArtworkKey();
+    const settings = await refreshArtworkSettings();
+    await downloadArtworkFor(current.appId, current.searchName.trim(), false, settings.slots);
+  };
+
   const onAddToSteam = async () => {
     if (!target) return;
     const gameName = name.trim();
+    // Artwork is searched for under the real title when the library name is not
+    // one SteamGridDB would recognise.
+    const searchName = artworkName.trim() || gameName;
+    const hasOwnIcon = Boolean(iconPath);
     setBusy(true);
     try {
       updateDraft({ addError: null });
@@ -319,9 +431,13 @@ function Content() {
           name: gameName,
           verified: result.verified,
           collection: filedInto ?? undefined,
+          searchName,
+          artwork: null,
+          artworkProgress: null,
         },
         target: null,
         name: "",
+        artworkName: "",
         launchOptions: "",
         compatTool: NO_COMPAT_TOOL,
         iconPath: "",
@@ -334,7 +450,39 @@ function Content() {
         body: gameName,
       });
 
-      await promptRestart(gameName);
+      // "Last added" is the top section now, but the panel is still scrolled to
+      // wherever the form's button was — and the artwork progress that appears
+      // there is the only thing on screen saying the download is happening.
+      scrollToTop(topAnchor.current);
+
+      // Read the settings back instead of trusting what was loaded at mount: if
+      // that one read failed, artwork would be skipped for the rest of the
+      // session with nothing to show it had been.
+      const settings = await refreshArtworkSettings();
+
+      // Before the restart, and awaited: a restart while art is still being
+      // applied loses the rest of it.
+      let artworkFailed = false;
+      if (settings.enabled) {
+        // A key typed a moment ago may still be waiting out its debounce, and
+        // the backend can only use what it has been given.
+        await flushArtworkKey();
+        const artwork = await downloadArtworkFor(
+          result.appId,
+          searchName,
+          hasOwnIcon,
+          settings.slots,
+        );
+        artworkFailed = !artwork.success;
+        toaster.toast({
+          title: artwork.success ? "Artwork applied" : "No artwork",
+          body: artwork.success ? artwork.applied.join(", ") : artwork.error,
+        });
+      }
+
+      // An automatic restart is skipped when the artwork failed: the reason is
+      // on screen, and restarting is what would take it away unread.
+      await promptRestart(gameName, artworkFailed);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log("error", `Could not add "${gameName}": ${message}`).catch(() => {});
@@ -357,6 +505,72 @@ function Content() {
   const onChangeRestartPreference = (value: RestartPreference) => {
     setRestartPreferenceState(value);
     setRestartPreference(value).catch(() => {});
+  };
+
+  // A settings write per keystroke would be silly, so the key is saved once
+  // typing stops. Deliberately not cancelled on unmount: the panel can be
+  // hidden mid-edit, and the key still has to be saved.
+  const keySaveTimer = useRef<number | undefined>(undefined);
+  /** The key waiting on that timer, or null when nothing is pending. */
+  const unsavedKey = useRef<string | null>(null);
+
+  /**
+   * Ask SteamGridDB whether the saved key actually works.
+   *
+   * Run after every save, so a key that was mistyped, truncated by a partial
+   * paste or never written to disk says so there and then rather than at the
+   * next add — which is several steps later and easy to blame on something else.
+   */
+  const checkKey = async () => {
+    setKeyStatus("Checking the key with SteamGridDB…");
+    try {
+      const result = await checkSteamGridDb();
+      setKeyStatus(result.ok ? `SteamGridDB: ${result.detail}.` : `Not usable: ${result.detail}.`);
+    } catch (error) {
+      setKeyStatus(`Could not reach the plugin's backend: ${message(error)}.`);
+    }
+  };
+
+  const saveKey = async (key: string) => {
+    unsavedKey.current = null;
+    try {
+      await setSteamGridDbKey(key);
+    } catch (error) {
+      setKeyStatus(`Could not save the key: ${message(error)}.`);
+      return;
+    }
+    if (key.trim()) await checkKey();
+    else setKeyStatus("");
+  };
+
+  /** Save a debounced key right now, for when something is about to need it. */
+  const flushArtworkKey = async () => {
+    const key = unsavedKey.current;
+    if (key === null) return;
+    clearTimeout(keySaveTimer.current);
+    await saveKey(key);
+  };
+
+  /**
+   * `immediate` skips the debounce, for a key that arrived all at once rather
+   * than a character at a time — a pasted key should be usable straight away.
+   */
+  const onChangeArtwork = (patch: Partial<ArtworkSettings>, immediate = false) => {
+    setArtworkSettings((current) => ({ ...current, ...patch }));
+
+    if (patch.enabled !== undefined) setArtworkEnabled(patch.enabled).catch(() => {});
+    if (patch.key !== undefined) {
+      const key = patch.key;
+      clearTimeout(keySaveTimer.current);
+      if (immediate) {
+        saveKey(key).catch(() => {});
+      } else {
+        unsavedKey.current = key;
+        keySaveTimer.current = window.setTimeout(() => {
+          saveKey(key).catch(() => {});
+        }, 700);
+      }
+    }
   };
 
   const compatOptions = [
@@ -403,17 +617,42 @@ function Content() {
   // takes over so the user is not scrolling past a sidebar to reach it.
   const body = !target ? (
       <>
-        {backendError && (
+        {(backendError || versionWarning) && (
           <PanelSection>
-            <PanelSectionRow>
-              <Field description={backendError} />
-            </PanelSectionRow>
+            {backendError && (
+              <PanelSectionRow>
+                <Field description={backendError} />
+              </PanelSectionRow>
+            )}
+            {versionWarning && (
+              <PanelSectionRow>
+                <Field description={versionWarning} />
+              </PanelSectionRow>
+            )}
           </PanelSection>
         )}
 
         {errorBanner}
 
-        <PanelSection>
+        {/* First, not last: this is where an add reports what it did, including
+            the artwork progress that runs before Steam restarts. Below the
+            application list it was off the bottom of the screen. */}
+        {added && (
+          <AddedSection
+            added={added}
+            artworkReady={artworkSettings.enabled && Boolean(artworkSettings.key.trim())}
+            onUndo={onUndo}
+            onArtwork={retryArtwork}
+            onChangeSearchName={(searchName) => {
+              const current = getDraft().added;
+              if (current) updateDraft({ added: { ...current, searchName } });
+            }}
+          />
+        )}
+
+        {/* Titled, so the segmented control below it reads as a choice of what
+            to browse rather than two loose buttons. */}
+        <PanelSection title="Browse">
           <SourceTabs value={source} onChange={(next) => updateDraft({ source: next })} />
         </PanelSection>
 
@@ -456,11 +695,14 @@ function Content() {
           </>
         )}
 
-        {added && <AddedSection added={added} onUndo={onUndo} />}
-
-        <OptionsSection value={restartPreference} onChange={onChangeRestartPreference} />
-
-        <Diagnostics />
+        <OptionsSection
+          value={restartPreference}
+          onChange={onChangeRestartPreference}
+          artwork={artworkSettings}
+          onChangeArtwork={onChangeArtwork}
+          keyStatus={keyStatus}
+          onCheckKey={checkKey}
+        />
       </>
   ) : (
     <>
@@ -503,53 +745,70 @@ function Content() {
 
       <PanelSection title="Details">
         <PanelSectionRow>
-          <TextField
+          <TextEntry
             label="Name"
             value={name}
-            onChange={(event) => updateDraft({ name: event.target.value })}
+            onChange={(next) => updateDraft({ name: next })}
             description="Shown in your Steam library."
           />
         </PanelSectionRow>
 
-        <PanelSectionRow>
-          <DropdownItem
-            label="Compatibility"
-            description={
-              target.is_windows_app
-                ? "Windows games need Proton to run."
-                : "Leave on None unless the game needs Proton."
-            }
-            rgOptions={compatOptions}
-            selectedOption={compatTool}
-            onChange={(option) => updateDraft({ compatTool: option.data })}
-          />
-        </PanelSectionRow>
+        {artworkSettings.enabled && (
+          artworkSettings.key ? (
+            <PanelSectionRow>
+              <TextEntry
+                label="Artwork title"
+                value={artworkName}
+                onChange={(next) => updateDraft({ artworkName: next })}
+                description="Optional. The game's real title, if the name above is not one SteamGridDB would know."
+              />
+            </PanelSectionRow>
+          ) : (
+            <PanelSectionRow>
+              <Field
+                label="Artwork"
+                padding="compact"
+                description={`Add a SteamGridDB API key under Options to download artwork automatically. Get one at ${artworkSettings.key_url}.`}
+              />
+            </PanelSectionRow>
+          )
+        )}
+
+        <StackedDropdown
+          label="Compatibility"
+          description={
+            target.is_windows_app
+              ? "Windows games need Proton to run."
+              : "Leave on None unless the game needs Proton."
+          }
+          rgOptions={compatOptions}
+          selectedOption={compatTool}
+          onChange={(option) => updateDraft({ compatTool: option.data })}
+        />
 
         <PanelSectionRow>
-          <TextField
+          <TextEntry
             label="Launch options"
             value={launchOptions}
-            onChange={(event) => updateDraft({ launchOptions: event.target.value })}
+            onChange={(next) => updateDraft({ launchOptions: next })}
             description="Optional. Use %command% to wrap the executable."
           />
         </PanelSectionRow>
 
-        <PanelSectionRow>
-          <DropdownItem
-            label="Collection"
-            description="Optional. Which library collection to file this under."
-            rgOptions={collectionOptions}
-            selectedOption={collectionId}
-            onChange={(option) => updateDraft({ collectionId: option.data as string })}
-          />
-        </PanelSectionRow>
+        <StackedDropdown
+          label="Collection"
+          description="Optional. Which library collection to file this under."
+          rgOptions={collectionOptions}
+          selectedOption={collectionId}
+          onChange={(option) => updateDraft({ collectionId: option.data as string })}
+        />
 
         {collectionId === NEW_COLLECTION && (
           <PanelSectionRow>
-            <TextField
+            <TextEntry
               label="New collection name"
               value={newCollectionName}
-              onChange={(event) => updateDraft({ newCollectionName: event.target.value })}
+              onChange={(next) => updateDraft({ newCollectionName: next })}
             />
           </PanelSectionRow>
         )}
@@ -572,7 +831,105 @@ function Content() {
   );
 }
 
-function AddedSection({ added, onUndo }: { added: AddedShortcut; onUndo(): void }) {
+/**
+ * A dropdown with its label above it and its explanation below it.
+ *
+ * `DropdownItem` puts the label and the control side by side, which in a panel
+ * this narrow leaves each of them a couple of words wide and wraps both — and
+ * the description then wraps under the label, so three things compete for the
+ * same corner. Stacking them costs a little height and makes the row readable
+ * at a glance, matching how the button rows already read.
+ */
+function StackedDropdown({
+  label,
+  description,
+  rgOptions,
+  selectedOption,
+  onChange,
+}: {
+  label: string;
+  description?: string;
+  rgOptions: DropdownOption[];
+  selectedOption: string;
+  onChange(option: SingleDropdownOption): void;
+}) {
+  return (
+    <>
+      <PanelSectionRow>
+        <Field
+          label={label}
+          childrenLayout="below"
+          childrenContainerWidth="max"
+          bottomSeparator="none"
+        >
+          <Dropdown rgOptions={rgOptions} selectedOption={selectedOption} onChange={onChange} />
+        </Field>
+      </PanelSectionRow>
+      {description && (
+        <PanelSectionRow>
+          <Field description={description} padding="compact" />
+        </PanelSectionRow>
+      )}
+    </>
+  );
+}
+
+/**
+ * One line describing how the artwork download went, or "" when there is
+ * nothing to say — artwork turned off, or a download not attempted yet.
+ *
+ * Names the files on disk, since none of them are visible in the library until
+ * Steam restarts: without that, a download that worked and one that did nothing
+ * read exactly the same.
+ */
+function describeArtwork(added: AddedShortcut): string {
+  const artwork = added.artwork;
+  if (!artwork) return "";
+
+  const count = artwork.files.length;
+  const files = count === 1 ? "file" : "files";
+  const onDisk = count > 0 ? ` ${count} ${files} in ${artwork.directory}.` : "";
+
+  if (!artwork.success) return `No artwork: ${artwork.error}.${onDisk}`;
+
+  // Worth saying when SteamGridDB matched a different title, since that is the
+  // one case where correct-looking artwork can be for the wrong game.
+  const matched =
+    artwork.game && artwork.game.toLowerCase() !== added.searchName.toLowerCase()
+      ? ` for "${artwork.game}"`
+      : "";
+  // Library art is applied through Steam and is there now; the icon is a file on
+  // the shortcut, and shortcuts are only read at startup.
+  const icon = artwork.iconPath ? " The icon appears after Steam restarts." : "";
+  return `Artwork${matched}: ${artwork.applied.join(", ")}.${onDisk}${icon}`;
+}
+
+function AddedSection({
+  added,
+  artworkReady,
+  onUndo,
+  onArtwork,
+  onChangeSearchName,
+}: {
+  added: AddedShortcut;
+  /** Artwork is switched on and has a key, so a download is worth offering. */
+  artworkReady: boolean;
+  onUndo(): void;
+  onArtwork(): void;
+  onChangeSearchName(value: string): void;
+}) {
+  const artworkSummary = describeArtwork(added);
+  const progress = added.artworkProgress;
+
+  // An exact match already has its artwork, so there is nothing to fix. Every
+  // other state — a failure, art found under a different title, or no attempt
+  // at all — is worth a try with a corrected title, which is only possible here
+  // since the form is gone by now.
+  const exactMatch =
+    added.artwork?.success &&
+    added.artwork.game.toLowerCase() === added.searchName.toLowerCase();
+  const canRetryArtwork = artworkReady && !progress && !exactMatch;
+
   return (
     <PanelSection title="Last added">
       {!added.verified && (
@@ -580,6 +937,60 @@ function AddedSection({ added, onUndo }: { added: AddedShortcut; onUndo(): void 
           <Field description="Steam did not confirm this shortcut. Restart Steam and check your library — if it is missing, try again." />
         </PanelSectionRow>
       )}
+
+      {/* Steam is not restarted until this finishes, so it doubles as the
+          reason the panel is busy. */}
+      {progress && (
+        <ProgressRow
+          label="Artwork"
+          description="Downloading from SteamGridDB. Steam restarts once this is done."
+          done={progress.done}
+          total={progress.total}
+          status={
+            progress.slot
+              ? `${progress.slot} (${progress.done + 1} of ${progress.total})`
+              : "Searching SteamGridDB…"
+          }
+        />
+      )}
+
+      {artworkSummary && (
+        <PanelSectionRow>
+          <Field description={artworkSummary} />
+        </PanelSectionRow>
+      )}
+
+      {/* The one case that would otherwise say nothing at all, which is what
+          "it added the game but downloaded no artwork" looks like. */}
+      {!artworkReady && !added.artwork && (
+        <PanelSectionRow>
+          <Field description="No artwork was downloaded: turn on Download artwork under Options and set a SteamGridDB API key." />
+        </PanelSectionRow>
+      )}
+
+      {canRetryArtwork && (
+        <PanelSectionRow>
+          <TextEntry
+            label="Artwork title"
+            value={added.searchName}
+            description="The title to look for on SteamGridDB."
+            onChange={onChangeSearchName}
+          />
+        </PanelSectionRow>
+      )}
+
+      {canRetryArtwork && (
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={!added.searchName.trim()}
+            onClick={onArtwork}
+          >
+            {added.artwork ? "Try artwork again" : "Download artwork"}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+
       <PanelSectionRow>
         <ButtonItem
           layout="below"
@@ -613,57 +1024,209 @@ function AddedSection({ added, onUndo }: { added: AddedShortcut; onUndo(): void 
 function OptionsSection({
   value,
   onChange,
+  artwork,
+  onChangeArtwork,
+  keyStatus,
+  onCheckKey,
 }: {
   value: RestartPreference;
   onChange(value: RestartPreference): void;
+  artwork: ArtworkSettings;
+  onChangeArtwork(patch: Partial<ArtworkSettings>, immediate?: boolean): void;
+  /** What SteamGridDB said about the saved key, or "" before it was asked. */
+  keyStatus: string;
+  onCheckKey(): void;
 }) {
-  const [savedSummary, setSavedSummary] = useState<string | null>(null);
+  const [pasteResult, setPasteResult] = useState<string | null>(null);
 
-  const onCheckSaved = async () => {
-    setSavedSummary("Checking…");
-    try {
-      const saved = await listSavedShortcuts();
-      if (!saved.found) {
-        setSavedSummary(saved.error ?? "Steam has not written a shortcuts file yet.");
-        return;
-      }
-      const names = saved.shortcuts.map((shortcut) => shortcut.name).filter(Boolean);
-      setSavedSummary(
-        names.length === 0
-          ? "Steam has no non-Steam games saved to disk."
-          : `${names.length} saved: ${names.join(", ")}`,
-      );
-    } catch (error) {
-      setSavedSummary(error instanceof Error ? error.message : String(error));
+  // `TextEntry` fills this with the real <input>, which is what the paste routes
+  // below write into and read back from.
+  const keyInputRef = useRef<HTMLInputElement | null>(null);
+  const keyInput = () => keyInputRef.current;
+
+  /** Wait briefly for a native paste to show up on the element. */
+  const waitForField = async (input: HTMLInputElement, before: string): Promise<string> => {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const value = input.value.trim();
+      if (value && value !== before.trim()) return value;
     }
+    return "";
+  };
+
+  const commitKey = (key: string, from: string) => {
+    // Saved without waiting out the debounce: the next thing anyone does after
+    // pasting a key is use it.
+    onChangeArtwork({ key }, true);
+    setPasteResult(`Pasted ${key.length} characters (via ${from}).`);
+    log("info", `Paste key succeeded via ${from}`).catch(() => {});
+  };
+
+  /**
+   * Get the key in by whatever route this Steam build allows.
+   *
+   * On a Deck in Game Mode the obvious routes are all closed, so these are
+   * ordered by what actually works there rather than by tidiness:
+   *
+   * 1. Steam's native paste into the field. gamescope implements no clipboard
+   *    of its own, so the Steam client's internal one is the only clipboard
+   *    there is, and this is how the on-screen keyboard reaches it.
+   * 2. `navigator.clipboard.readText()`, which refuses with *Document is not
+   *    focused* unless the panel holds the window's focus.
+   * 3. `execCommand("paste")`, for builds where the clipboard API is denied.
+   * 4. The backend asking the compositor — no use under gamescope, but right
+   *    for a desktop session.
+   * 5. Whatever is already in the field, so pasting with the keyboard and then
+   *    pressing this still works.
+   */
+  const onPasteKey = async () => {
+    setPasteResult("Reading the clipboard…");
+    const input = keyInput();
+    // Read up front: every route below writes into the field, so this is what
+    // "changed" is measured against.
+    const before = input?.value ?? "";
+
+    // Every route's outcome, not just the last one. Three rounds of "it still
+    // does not work" went by without knowing which of these actually ran.
+    const tried: string[] = [];
+    const because = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+    // Everything below has to be aimed at the window the panel's DOM is in.
+    // This plugin's own `window` is a different one, whose document can never
+    // hold focus — which is what every clipboard read was failing on.
+    const view = panelWindow(input);
+    const doc = input?.ownerDocument ?? view.document;
+
+    if (!input) {
+      tried.push("field: no input element");
+    } else if (nativePaste(input)) {
+      const pasted = await waitForField(input, before);
+      if (pasted) return commitKey(pasted, "Steam paste");
+      tried.push("Steam paste: nothing arrived");
+    } else {
+      tried.push("Steam paste: unavailable");
+    }
+
+    for (const attempt of [0, 1]) {
+      try {
+        const pasted = (await readClipboard(view)).trim();
+        if (pasted) return commitKey(pasted, "clipboard");
+        tried.push("clipboard: empty");
+        break;
+      } catch (error) {
+        if (attempt === 0) {
+          // Focus may simply not have landed on that document yet.
+          view.focus();
+          input?.focus();
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        } else {
+          tried.push(`clipboard: ${because(error)}${doc.hasFocus() ? "" : " (still unfocused)"}`);
+        }
+      }
+    }
+
+    if (input) {
+      try {
+        input.focus();
+        if (doc.execCommand("paste")) {
+          const pasted = await waitForField(input, before);
+          if (pasted) return commitKey(pasted, "execCommand");
+          tried.push("execCommand: nothing arrived");
+        } else {
+          tried.push("execCommand: refused");
+        }
+      } catch (error) {
+        tried.push(`execCommand: ${because(error)}`);
+      }
+    }
+
+    try {
+      const fromBackend = await readSystemClipboard();
+      const text = fromBackend.text.trim();
+      if (text) return commitKey(text, "desktop clipboard");
+      tried.push(`desktop: ${fromBackend.error || "empty"}`);
+    } catch (error) {
+      tried.push(`desktop: ${because(error)}`);
+    }
+
+    const inField = (input?.value || before).trim();
+    if (inField && inField !== artwork.key.trim()) return commitKey(inField, "field");
+
+    const summary = tried.join("; ");
+    log("warning", `Paste key failed — ${summary}`).catch(() => {});
+    setPasteResult(
+      `No route worked (${summary}). Type the key in with the keyboard instead.`,
+    );
   };
 
   return (
     <PanelSection title="Options">
+      <StackedDropdown
+        label="Restart Steam after adding"
+        description="Restarting is what saves new games permanently."
+        rgOptions={[
+          { data: "ask", label: "Ask each time" },
+          { data: "always", label: "Always restart" },
+          { data: "never", label: "Never restart" },
+        ]}
+        selectedOption={value}
+        onChange={(option) => onChange(option.data as RestartPreference)}
+      />
+
       <PanelSectionRow>
-        <DropdownItem
-          label="Restart Steam after adding"
-          description="Restarting is what saves new games permanently."
-          rgOptions={[
-            { data: "ask", label: "Ask each time" },
-            { data: "always", label: "Always restart" },
-            { data: "never", label: "Never restart" },
-          ]}
-          selectedOption={value}
-          onChange={(option) => onChange(option.data as RestartPreference)}
+        <ToggleField
+          label="Download artwork"
+          description="Fetch grid, hero, logo and icon art from SteamGridDB for each game you add."
+          checked={artwork.enabled}
+          onChange={(enabled) => onChangeArtwork({ enabled })}
         />
       </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          description={
-            savedSummary ?? "Reads Steam's saved games file. It only updates when Steam restarts."
-          }
-          onClick={onCheckSaved}
-        >
-          Check saved games
-        </ButtonItem>
-      </PanelSectionRow>
+
+      {artwork.enabled && (
+        <>
+          {/* Above the field, not below it: the instructions are read once,
+              while the field and its paste button have to stay next to each
+              other. They also go away entirely once a key is set. */}
+          {!artwork.key.trim() && (
+            <PanelSectionRow>
+              <Field
+                padding="compact"
+                description={`SteamGridDB needs a free API key. Create one at ${artwork.key_url}, copy it, then press Paste key below.`}
+              />
+            </PanelSectionRow>
+          )}
+
+          <PanelSectionRow>
+            <TextEntry
+              label="SteamGridDB API key"
+              value={artwork.key}
+              inputRef={keyInputRef}
+              // The one field a user cannot reasonably type, so it takes a
+              // paste even when the event was aimed somewhere else.
+              captureGlobalPaste
+              onChange={(next) => onChangeArtwork({ key: next })}
+            />
+          </PanelSectionRow>
+
+          {/* Directly under the field, with nothing between them, and silent
+              until it has something to report. */}
+          <PanelSectionRow>
+            <ButtonItem layout="below" description={pasteResult ?? undefined} onClick={onPasteKey}>
+              Paste key
+            </ButtonItem>
+          </PanelSectionRow>
+
+          {/* The key is checked against SteamGridDB after every save, so this
+              answers "is the key in and working" without waiting for an add. */}
+          <PanelSectionRow>
+            <ButtonItem layout="below" description={keyStatus || undefined} onClick={onCheckKey}>
+              Check the artwork key
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
+      )}
+
+      <SavedGames />
     </PanelSection>
   );
 }

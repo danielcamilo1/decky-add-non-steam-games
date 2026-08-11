@@ -1,3 +1,5 @@
+import { findSP } from "@decky/ui";
+
 /** A Proton/compatibility tool as reported by `SteamClient.Settings.GetGlobalCompatTools`. */
 export interface CompatibilityTool {
   strToolName: string;
@@ -271,12 +273,158 @@ export async function addToCollection(
   await collection.Save();
 }
 
-/** Number of non-Steam shortcuts Steam currently holds in memory, or null if unreadable. */
-export function countShortcutsInMemory(): number | null {
-  const store = (window as unknown as { collectionStore?: { deckDesktopApps?: { apps?: Map<number, unknown> } } })
-    .collectionStore;
-  const apps = store?.deckDesktopApps?.apps;
-  return apps ? apps.size : null;
+/**
+ * The window the panel's own DOM lives in.
+ *
+ * A plugin's JavaScript does not necessarily run in the window it renders into:
+ * the global `document` here is a different document from the one holding the
+ * Quick Access panel. That single fact explains two symptoms that look
+ * unrelated — `document.hasFocus()` reporting false (it is not the focused
+ * document, and never will be) and a document-wide query for the panel's own
+ * `<input>` elements finding none of them.
+ *
+ * So anything to do with focus, the clipboard or `execCommand` has to be aimed
+ * at *this* window, resolved from a node that is actually in the panel.
+ */
+export function panelWindow(node?: Node | null): Window {
+  const fromNode = node?.ownerDocument?.defaultView;
+  if (fromNode) return fromNode;
+
+  try {
+    return findSP();
+  } catch (error) {
+    console.error("[add-non-steam-games] could not find Steam's window", error);
+    return window;
+  }
+}
+
+/**
+ * Read the clipboard through the web API, in the panel's own window.
+ *
+ * Refuses with *Document is not focused* unless that document holds focus, so
+ * callers still need a fallback — but pass the right window and it at least has
+ * a chance, which it never does from the plugin's own context.
+ */
+export async function readClipboard(view: Window = window): Promise<string> {
+  const clipboard: { readText?(): Promise<string> } | undefined = view.navigator?.clipboard;
+  if (typeof clipboard?.readText !== "function") {
+    throw new Error("This Steam build does not allow reading the clipboard.");
+  }
+  return await clipboard.readText();
+}
+
+/**
+ * Paste into `input` using Steam's own native paste.
+ *
+ * This is the mechanism behind the on-screen keyboard's paste key, and the only
+ * one that reaches the Steam client's internal clipboard: Game Mode runs on
+ * gamescope, which does not implement `wl_data_device_manager`, so there is no
+ * compositor clipboard for `wl-paste` — or anything else outside Steam — to
+ * read.
+ *
+ * The paste happens natively, below React, so the caller reads the result off
+ * the element rather than waiting for a change event that may never come.
+ * Returns whether the call was made at all.
+ */
+export function nativePaste(input: HTMLInputElement): boolean {
+  const browser = SteamClient?.Browser;
+  if (typeof browser?.Paste !== "function") return false;
+
+  try {
+    input.focus();
+    // Some builds gate clipboard access on a recent user activation, and a
+    // gamepad button press does not always count as one.
+    if (typeof browser.NotifyUserActivation === "function") browser.NotifyUserActivation();
+    browser.Paste();
+    return true;
+  } catch (error) {
+    console.error("[add-non-steam-games] native paste failed", error);
+    return false;
+  }
+}
+
+/**
+ * Point an existing shortcut at an icon file.
+ *
+ * Steam reads a non-Steam game's icon from the shortcut itself rather than from
+ * the grid folder, so a downloaded icon only takes effect once this is called.
+ */
+export function setShortcutIcon(appId: number, iconPath: string): void {
+  try {
+    SteamClient.Apps.SetShortcutIcon(appId, iconPath);
+  } catch (error) {
+    console.error("[add-non-steam-games] could not set the shortcut icon", error);
+  }
+}
+
+/**
+ * Steam's `ELibraryAssetType`: 0 capsule, 1 hero, 2 logo, 3 header, 4 icon.
+ *
+ * Typed as a number rather than imported: `ELibraryAssetType` exists only in
+ * `@decky/ui`'s type declarations, so the enum has no runtime value to read.
+ */
+type LibraryAssetType = 0 | 1 | 2 | 3 | 4;
+
+interface CustomArtworkApi {
+  ClearCustomArtworkForApp(appId: number, assetType: number): Promise<void>;
+  SetCustomArtworkForApp(
+    appId: number,
+    base64: string,
+    imageType: "png" | "jpg",
+    assetType: number,
+  ): Promise<void>;
+}
+
+/**
+ * Give Steam a piece of library artwork for an app.
+ *
+ * This is how art gets applied from inside Game Mode: Steam writes the file into
+ * its own grid folder and updates the library immediately, no restart. Writing
+ * those files directly is the desktop-tool approach (BoilR, Steam ROM Manager)
+ * and does not reliably take effect for a client that is already running.
+ *
+ * Existing art is cleared first, because `SetCustomArtworkForApp` will not
+ * replace an asset that is already set — the same order SteamGridDB's own plugin
+ * uses, including the wait, since `Clear` resolves before it has finished.
+ */
+export async function applyCustomArtwork(
+  appId: number,
+  assetType: LibraryAssetType,
+  base64: string,
+  imageType: "png" | "jpg",
+): Promise<void> {
+  const apps = SteamClient.Apps as unknown as CustomArtworkApi;
+
+  await apps.ClearCustomArtworkForApp(appId, assetType);
+  await sleep(500);
+  await apps.SetCustomArtworkForApp(appId, base64, imageType, assetType);
+
+  // A shortcut with no saved logo position renders its logo blank, so give it
+  // the default one Steam would otherwise have written on first edit.
+  if (assetType === 2) fixLogoPosition(appId);
+}
+
+/** Steam's default logo placement, written only when the app has none. */
+function fixLogoPosition(appId: number): void {
+  // The two stores disagree about the overview type they hand around, and only
+  // one of them is what `appStore` actually returns.
+  const details = window.appDetailsStore as unknown as {
+    GetCustomLogoPosition(app: unknown): unknown;
+    SaveCustomLogoPosition(app: unknown, position: Record<string, unknown>): unknown;
+  };
+
+  try {
+    const overview = window.appStore?.GetAppOverviewByAppID(appId);
+    if (!overview || details.GetCustomLogoPosition(overview)) return;
+
+    details.SaveCustomLogoPosition(overview, {
+      pinnedPosition: "BottomLeft",
+      nWidthPct: 50,
+      nHeightPct: 50,
+    });
+  } catch (error) {
+    console.error("[add-non-steam-games] could not set the logo position", error);
+  }
 }
 
 export function removeShortcut(appId: number): void {
