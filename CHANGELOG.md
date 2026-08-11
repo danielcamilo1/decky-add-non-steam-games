@@ -4,6 +4,26 @@ The section for a version is what the release workflow puts on that release's
 page, so write it for someone deciding whether to update — not for someone
 reading the diff.
 
+## v1.7.13
+
+**Steam shortcuts list**
+
+- **Check saved games** is now **Load Steam Shortcuts**, and says what it does
+  before you press it: it shows the shortcuts currently in Steam, and only
+  updates when the Steam client restarts.
+- The list is sorted alphabetically. It used to arrive in whatever order Steam
+  had written `shortcuts.vdf`, which is no order at all to look through.
+- Thirty entries was a hard cut-off, with the rest simply unreachable. The list
+  now opens at twenty and a **Show 20 more** row extends it, so nothing is out
+  of reach and the panel still opens short. Pressing it moves the D-pad onto
+  the first row it revealed, rather than dropping the selection twenty rows
+  down the panel with the row that was pressed.
+- A **Search** field appears once there are twelve or more shortcuts, matching
+  on the name and the path — the fastest way to answer "is my game in here?"
+  without scrolling past a hundred rows.
+- The **Show the list** toggle no longer sits flush against the button above it
+  or the first entry below it.
+
 ## v1.7.10
 
 **Browse tabs**

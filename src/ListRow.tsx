@@ -1,5 +1,5 @@
 import { DialogButton, Focusable } from "@decky/ui";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { FaChevronDown, FaChevronRight } from "react-icons/fa6";
 
 export interface ListRowProps {
@@ -7,6 +7,13 @@ export interface ListRowProps {
   label: string;
   /** Right-aligned secondary text: free space, app source, and so on. */
   trailing?: string;
+  /**
+   * Take gamepad focus when this row appears.
+   *
+   * For a row that arrives in response to a press, so the D-pad carries on from
+   * what the press produced rather than from wherever the pressed row went.
+   */
+  takeFocus?: boolean;
   onSelect(): void;
 }
 
@@ -17,9 +24,22 @@ export interface ListRowProps {
  * panel that makes them large D-pad targets, and keeps a long list scannable
  * without a trackpad.
  */
-export function ListRow({ icon, label, trailing, onSelect }: ListRowProps) {
+export function ListRow({ icon, label, trailing, takeFocus, onSelect }: ListRowProps) {
+  const element = useRef<HTMLDivElement>(null);
+
+  // Steam moves gamepad focus by focusing the real element, so this is the
+  // whole of handing the D-pad to a row. A frame late: the row is not laid out
+  // until after the commit that mounted it has painted, and focus given to an
+  // unlaid-out element is focus Steam's navigation immediately takes back.
+  useEffect(() => {
+    if (!takeFocus) return;
+    const frame = requestAnimationFrame(() => element.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [takeFocus]);
+
   return (
     <DialogButton
+      ref={element}
       onClick={onSelect}
       style={{
         display: "flex",
