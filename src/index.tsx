@@ -175,8 +175,13 @@ function Content() {
 
   // The compat tool list loads asynchronously, so a file picked before it
   // arrives gets its Proton default applied here instead.
+  // Once per file: the list is re-read whenever the panel opens, and that must not
+  // undo someone choosing None on purpose.
+  const defaultedTarget = useRef<PathInfo | null>(null);
   useEffect(() => {
-    if (target?.is_windows_app && compatTool === NO_COMPAT_TOOL && compatTools.length > 0) {
+    if (!target || compatTools.length === 0 || defaultedTarget.current === target) return;
+    defaultedTarget.current = target;
+    if (target.is_windows_app && compatTool === NO_COMPAT_TOOL) {
       updateDraft({ compatTool: pickDefaultCompatTool(compatTools) });
     }
   }, [compatTools, target]);
