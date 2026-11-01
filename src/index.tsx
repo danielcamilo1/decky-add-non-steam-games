@@ -123,9 +123,10 @@ function Content() {
 
   useEffect(() => {
     if (!panelVisible) return;
-    // Collections can be created elsewhere in Steam while the panel sits
-    // mounted, so re-read them rather than caching from first mount.
+    // Collections and compatibility tools can change elsewhere in Steam while
+    // the panel sits mounted, so re-read them rather than caching from first mount.
     setCollections(listCollections());
+    getCompatibilityTools().then(setCompatTools);
     // One frame later, so the panel has laid out before we reset it.
     const frame = requestAnimationFrame(() => scrollToTop(topAnchor.current));
     return () => cancelAnimationFrame(frame);
@@ -170,7 +171,6 @@ function Content() {
     getStartPath().then(setStartPath).catch(() => {});
     getRestartPreference().then(setRestartPreferenceState).catch(() => {});
     getArtworkSettings().then(setArtworkSettings).catch(() => {});
-    getCompatibilityTools().then(setCompatTools);
   }, []);
 
   // The compat tool list loads asynchronously, so a file picked before it
@@ -765,7 +765,9 @@ function Content() {
         <StackedDropdown
           label="Compatibility"
           description={
-            target.is_windows_app
+            compatTools.length === 0
+              ? "Could not read Steam's compatibility tools, so only None is available. Reopen this panel to retry."
+              : target.is_windows_app
               ? "Windows games need Proton to run."
               : "Leave on None unless the game needs Proton."
           }

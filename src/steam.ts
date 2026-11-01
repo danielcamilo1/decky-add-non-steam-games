@@ -1,4 +1,6 @@
-/** A Proton/compatibility tool as reported by `SteamClient.Settings.GetGlobalCompatTools`. */
+import { getCompatManagerTools } from "./compatTools";
+
+/** A Proton/compatibility tool as reported by Steam. */
 export interface CompatibilityTool {
   strToolName: string;
   strDisplayName: string;
@@ -377,10 +379,16 @@ export function restartSteam(): void {
  *
  * Steam includes a "None"/default entry with an empty `strToolName`; it is
  * dropped here because the UI models "no compat tool" as its own choice.
+ *
+ * Current clients no longer have `GetGlobalCompatTools`, so it is only used
+ * where it still exists. Calling it unguarded leaves the list empty.
  */
 export async function getCompatibilityTools(): Promise<CompatibilityTool[]> {
   try {
-    const tools = await SteamClient.Settings.GetGlobalCompatTools();
+    const tools =
+      typeof SteamClient.Settings.GetGlobalCompatTools === "function"
+        ? await SteamClient.Settings.GetGlobalCompatTools()
+        : await getCompatManagerTools();
     return (tools ?? []).filter((tool) => Boolean(tool?.strToolName));
   } catch (error) {
     console.error("[add-non-steam-games] could not read compatibility tools", error);

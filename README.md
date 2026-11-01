@@ -115,6 +115,7 @@ The frontend lives in `src/`:
 - `RestartPrompt.tsx` — the post-add restart dialog.
 - `version.ts` — the build number, compared against the backend's at startup.
 - `steam.ts` — shortcut creation against Steam's own `SteamClient.Apps` API.
+- `compatTools.ts` — reads the compatibility tool list from Steam's CompatManager service.
 - `artwork.ts` — drives the SteamGridDB download slot by slot, reporting progress.
 - `backend.ts` / `pathinfo.ts` — typed bindings to `main.py`, and the local fallback used when the backend is unreachable.
 
