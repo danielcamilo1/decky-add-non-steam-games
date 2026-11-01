@@ -4,6 +4,19 @@ The section for a version is what the release workflow puts on that release's
 page, so write it for someone deciding whether to update — not for someone
 reading the diff.
 
+## v1.7.14
+
+**Compatibility list**
+
+- The **Compatibility** dropdown only offered "None (native Linux game)" on
+  current Steam clients, so Windows games could not be given Proton. Steam
+  removed the call the plugin used to read the list, and it now uses the service
+  that replaced it.
+- The list is read each time the panel opens, so a tool installed while the
+  plugin is running shows up without restarting anything.
+- If Steam still returns no tools, the dropdown says so instead of looking like
+  None is the only option.
+
 ## v1.7.13
 
 **Steam shortcuts list**

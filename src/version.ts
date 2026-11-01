@@ -5,4 +5,4 @@
  * compares this against what the backend reports, since a half-installed zip
  * leaves the two disagreeing and every symptom after that is confusing.
  */
-export const PLUGIN_VERSION = "1.7.13";
+export const PLUGIN_VERSION = "1.7.14";

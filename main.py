@@ -36,7 +36,7 @@ NON_EXECUTABLE_EXTENSIONS = {
 SETTINGS_FILENAME = "settings.json"
 
 # Shown in the panel so a stale install is obvious. Keep in sync with package.json.
-PLUGIN_VERSION = "1.7.13"
+PLUGIN_VERSION = "1.7.14"
 
 # "ask" prompts after every add; "always"/"never" skip the prompt.
 RESTART_CHOICES = ("ask", "always", "never")
